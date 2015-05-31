@@ -23,6 +23,21 @@ library
   exposed-modules:
     Dipper
 
+  other-modules:
+    Dipper.Jar
+
   build-depends:
-      base   >= 4.8 && < 4.9
-    , binary >= 0.7.4
+      base              >= 4.8 && < 4.9
+    , binary            >= 0.7
+    , bytestring        >= 0.10
+    , containers        >= 0.5
+    , directory         >= 1.2
+    , file-embed        >= 0.0
+    , filepath          >= 1.4
+    , pipes             >= 4.1
+    , pipes-group       >= 1.0
+    , pipes-text        >= 0.0
+    , process           >= 1.2
+    , process-streaming >= 0.7
+    , reinterpret-cast  >= 0.1
+    , text              >= 1.2
