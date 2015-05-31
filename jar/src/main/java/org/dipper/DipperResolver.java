@@ -2,6 +2,7 @@ package org.dipper;
 
 import java.io.DataInput;
 import java.io.DataOutput;
+import java.io.EOFException;
 import java.io.IOException;
 
 import org.apache.hadoop.conf.Configuration;
@@ -100,9 +101,13 @@ abstract class DipperOutputReader extends OutputReader<Writable, Writable> {
 
     @Override
     public boolean readKeyValue() throws IOException {
-        key.readFields(in);
-        value.readFields(in);
-        return true;
+        try {
+            key.readFields(in);
+            value.readFields(in);
+            return true;
+        } catch (EOFException eof) {
+            return false;
+        }
     }
 
     @Override

@@ -7,7 +7,7 @@ module Dipper where
 import           Control.Exception (bracket, catch)
 import           Data.Binary.Get
 import           Data.Binary.Put
-import           Data.Bits ((.|.), shiftL, xor)
+import           Data.Bits ((.|.), (.&.), shiftL, shiftR, xor)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as S
 import qualified Data.ByteString.Lazy.Char8 as L
@@ -93,15 +93,15 @@ runJob hadoopEnv = withTempFile "dipper.jar" dipperJar $ \jar -> do
 
         , "-D", "stream.io.identifier.resolver.class=org.dipper.DipperResolver"
         , "-D", "stream.map.input=map"
-        , "-D", "stream.map.output=text"
+        , "-D", "stream.map.output=map"
         --, "-D", "stream.reduce.input=reduce"
         --, "-D", "stream.reduce.output=reduce"
 
         , "-inputformat",  "org.apache.hadoop.streaming.AutoInputFormat"
         , "-input", "/user/root/features"
 
-        --, "-outputformat", "org.apache.hadoop.mapred.SequenceFileOutputFormat"
-        , "-outputformat", "org.apache.hadoop.mapred.TextOutputFormat"
+        , "-outputformat", "org.apache.hadoop.mapred.SequenceFileOutputFormat"
+        --, "-outputformat", "org.apache.hadoop.mapred.TextOutputFormat"
         , "-output", "/user/root/foo"
 
         , "-numReduceTasks", "0"
@@ -114,11 +114,11 @@ mapper :: IO ()
 mapper = L.interact (writeKVs . readKVs)
 
 writeKVs :: [(T.Text, S.ByteString)] -> L.ByteString
-writeKVs = L.unlines . map go
+writeKVs = L.concat . map (runPut . putKV)
   where
-    go (k, v) = L.fromStrict (T.encodeUtf8 k)
-             <> "\t"
-             <> L.pack (show (S.length v))
+    putKV (k, v) = do
+        putText k
+        putBytesWritable (S.pack (show (S.length v)))
 
 readKVs :: L.ByteString -> [(T.Text, S.ByteString)]
 readKVs bs | L.null bs = []
@@ -136,6 +136,11 @@ getKV = (,) <$> getText <*> getBytesWritable
 getText :: Get T.Text
 getText = T.decodeUtf8 <$> (getVInt >>= getByteString)
 
+putText :: T.Text -> Put
+putText tx = do
+    putVInt (T.length tx)
+    putByteString (T.encodeUtf8 tx)
+
 getBytesWritable :: Get S.ByteString
 getBytesWritable = getWord32be >>= getByteString . fromIntegral
 
@@ -143,6 +148,8 @@ putBytesWritable :: S.ByteString -> Put
 putBytesWritable bs = do
     putWord32be (fromIntegral (S.length bs))
     putByteString bs
+
+------------------------------------------------------------------------
 
 getVInt :: Get Int
 getVInt = fromIntegral <$> getVInt64
@@ -164,6 +171,38 @@ getVInt64 = withFirst . fromIntegral =<< getWord8
         fixupSign v = if isNegative then v `xor` (-1) else v
 
         isNegative = x < -120 || (x >= -112 && x < 0)
+
+putVInt :: Int -> Put
+putVInt = putVInt64 . fromIntegral
+
+putVInt64 :: Int64 -> Put
+putVInt64 i | i >= -112 && i <= 127 = putWord8 (fromIntegral i)
+            | otherwise             = putWord8 (fromIntegral encLen) >> putRest len
+  where
+    isNegative = i < 0
+
+    i' | isNegative = i `xor` (-1)
+       | otherwise  = i
+
+    encLen0 | isNegative = -120
+                | otherwise  = -112
+
+    encLen = go i' encLen0
+      where
+        go 0   n = n
+        go tmp n = go (tmp `shiftR` 8) (n-1)
+
+    len | encLen < -120 = -(encLen + 120)
+        | otherwise     = -(encLen + 112)
+
+    putRest 0   = return ()
+    putRest idx = putByte idx >> putRest (idx - 1)
+
+    putByte idx = putWord8 (fromIntegral ((i .&. mask) `shiftR` shift))
+      where
+        mask :: Int64
+        mask  = 0xff `shiftL` shift
+        shift = (idx - 1) * 8
 
 ------------------------------------------------------------------------
 
