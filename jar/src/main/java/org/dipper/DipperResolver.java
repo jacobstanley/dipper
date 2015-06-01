@@ -16,9 +16,6 @@ import org.apache.hadoop.streaming.io.InputWriter;
 import org.apache.hadoop.streaming.io.OutputReader;
 import org.apache.hadoop.util.ReflectionUtils;
 
-import org.apache.hadoop.streaming.io.TextInputWriter;
-import org.apache.hadoop.streaming.io.TextOutputReader;
-
 public class DipperResolver extends IdentifierResolver {
     @Override
     public void resolve(String identifier) {
@@ -32,11 +29,6 @@ public class DipperResolver extends IdentifierResolver {
             setOutputReaderClass(DipperOutputReader.class);
             setOutputKeyClass(Text.class);
             setOutputValueClass(BytesWritable.class);
-        } else if (identifier.equalsIgnoreCase("text")) {
-            setInputWriterClass(TextInputWriter.class);
-            setOutputReaderClass(TextOutputReader.class);
-            setOutputKeyClass(Text.class);
-            setOutputValueClass(Text.class);
         } else {
             throw new RuntimeException("Dipper: " + identifier);
         }

@@ -24,6 +24,7 @@ library
     Dipper
 
   other-modules:
+    Dipper.Internal
     Dipper.Jar
 
   build-depends:
