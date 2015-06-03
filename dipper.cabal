@@ -24,6 +24,7 @@ library
     Dipper
 
   other-modules:
+    Dipper.AST
     Dipper.Internal
     Dipper.Jar
 

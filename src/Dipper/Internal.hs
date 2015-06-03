@@ -1,6 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE StaticPointers #-}
 
 module Dipper.Internal where
 
@@ -15,7 +14,6 @@ import           Data.Monoid ((<>))
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import           Data.Word (Word8)
-import           GHC.StaticPtr (StaticPtr)
 import           System.Environment (getExecutablePath)
 import           System.Exit (ExitCode)
 import           System.FilePath (takeFileName)
@@ -72,9 +70,12 @@ runJob hadoopEnv dipperJarPath = do
         , "-D", "stream.reduce.input=reduce"
         , "-D", "stream.reduce.output=reduce"
 
-        , "-D", "mapreduce.output.fileoutputformat.compress=true"
-        , "-D", "mapreduce.output.fileoutputformat.compress.codec=org.apache.hadoop.io.compress.SnappyCodec"
-        , "-D", "mapreduce.output.fileoutputformat.compress.type=BLOCK"
+        , "-D", "mapred.output.compress=true"
+        , "-D", "mapred.output.compression.codec=org.apache.hadoop.io.compress.SnappyCodec"
+        , "-D", "mapred.output.compression.type=BLOCK"
+        --, "-D", "mapreduce.output.fileoutputformat.compress=true"
+        --, "-D", "mapreduce.output.fileoutputformat.compress.codec=org.apache.hadoop.io.compress.SnappyCodec"
+        --, "-D", "mapreduce.output.fileoutputformat.compress.type=BLOCK"
 
         , "-inputformat",  "org.apache.hadoop.streaming.AutoInputFormat"
         --, "-inputformat", "org.apache.hadoop.mapred.SequenceFileInputFormat"
@@ -90,11 +91,6 @@ runJob hadoopEnv dipperJarPath = do
 
 ------------------------------------------------------------------------
 
-mapperPtr :: StaticPtr (IO ())
-mapperPtr = static mapper
-
-------------------------------------------------------------------------
-
 mapper :: IO ()
 mapper = L.interact (writeKVs . readKVs)
 
@@ -107,11 +103,9 @@ writeKVs = L.concat . map (runPut . putKV)
 
 readKVs :: L.ByteString -> [(T.Text, S.ByteString)]
 readKVs bs | L.null bs = []
-           | otherwise = decode
-  where
-    decode = case runGetOrFail getKV bs of
-      Left  (_,   _, err)    -> error ("readKVs: " ++ err)
-      Right (bs', _, (k, v)) -> (k, v) : readKVs bs'
+           | otherwise = case runGetOrFail getKV bs of
+               Left  (_,   _, err)    -> error ("readKVs: " ++ err)
+               Right (bs', _, (k, v)) -> (k, v) : readKVs bs'
 
 getKV :: Get (T.Text, S.ByteString)
 getKV = (,) <$> getText <*> getBytesWritable
