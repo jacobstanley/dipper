@@ -22,9 +22,11 @@ library
 
   exposed-modules:
     Dipper
+    Dipper.AST
+    Dipper.Interpreter
+    Dipper.Types
 
   other-modules:
-    Dipper.AST
     Dipper.Internal
     Dipper.Jar
 
