@@ -171,13 +171,14 @@ data Tail n a where
                -> Tail n b
 
     -- | GroupByKey from the FlumeJava paper.
-    GroupByKey :: (Typeable n, Typeable k, Typeable v)
+    GroupByKey :: (Typeable n, Typeable k, Typeable v, Eq k)
                => Atom n (k :*:  v )
                -> Tail n (k :*: [v])
 
     -- | CombineValues from the FlumeJava paper.
     FoldValues :: (Typeable n, Typeable k, Typeable v)
                => (v -> v -> v)
+               -> v
                -> Atom n (k :*: [v])
                -> Tail n (k :*:  v )
 
@@ -233,14 +234,17 @@ instance Show n => Show (Atom n a) where
       app = 10
 
 instance Show n => Show (Tail n a) where
-  showsPrec p x = showParen (p > app) $ case x of
+  showsPrec p tl = showParen (p > app) $ case tl of
       Concat        xss -> showString "Concat "     . showsPrec (app+1) xss
       ConcatMap   f  xs -> showString "ConcatMap "  . showsPrec (app+1) (typeOf f)
                                                     . showString " "
                                                     . showsPrec (app+1) xs
       GroupByKey     xs -> showString "GroupByKey " . showsPrec (app+1) xs
-      FoldValues  f  xs -> showString "FoldValue "  . showsPrec (app+1) (typeOf f)
+      FoldValues f x xs -> showString "FoldValue "  . showsPrec (app+1) (typeOf f)
                                                     . showString " "
+                                                    . showsPrec (app+1) (typeOf x)
+                                                    . showString " "
+                                                    . showsPrec (app+1) xs
                                                     . showsPrec (app+1) xs
       ReadFile  path    -> showString "ReadFile "   . showsPrec (app+1) path
       WriteFile path xs -> showString "WriteFile "  . showsPrec (app+1) path

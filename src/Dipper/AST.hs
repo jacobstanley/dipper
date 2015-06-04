@@ -102,10 +102,10 @@ renameTail :: (Ord a, Show a, Show b, Typeable b)
            -> Tail a r
            -> Tail b r
 renameTail names tl = case tl of
-    Concat       xs  -> Concat         (map (renameAtom names) xs)
-    ConcatMap  f x   -> ConcatMap  f   (renameAtom names x)
-    GroupByKey   x   -> GroupByKey     (renameAtom names x)
-    FoldValues f x   -> FoldValues f   (renameAtom names x)
+    Concat        xs -> Concat         (map (renameAtom names) xs)
+    ConcatMap  f   x -> ConcatMap  f   (renameAtom names x)
+    GroupByKey     x -> GroupByKey     (renameAtom names x)
+    FoldValues f s x -> FoldValues f s (renameAtom names x)
     ReadFile  path   -> ReadFile  path
     WriteFile path x -> WriteFile path (renameAtom names x)
 
@@ -160,10 +160,10 @@ substTail :: (Ord n, Show n)
           -> Tail n a
           -> Tail n a
 substTail subs tl = case tl of
-    Concat       xs  -> Concat         (map (substAtom subs) xs)
-    ConcatMap  f x   -> ConcatMap  f   (substAtom subs x)
-    GroupByKey   x   -> GroupByKey     (substAtom subs x)
-    FoldValues f x   -> FoldValues f   (substAtom subs x)
+    Concat        xs -> Concat         (map (substAtom subs) xs)
+    ConcatMap  f   x -> ConcatMap  f   (substAtom subs x)
+    GroupByKey     x -> GroupByKey     (substAtom subs x)
+    FoldValues f s x -> FoldValues f s (substAtom subs x)
     ReadFile  path   -> ReadFile  path
     WriteFile path x -> WriteFile path (substAtom subs x)
 
@@ -178,17 +178,17 @@ substTerm subs term = case term of
 
 ------------------------------------------------------------------------
 
-example1 :: Term Int ()
+example1 :: Term String ()
 example1 = Let x0 (ReadFile "input.csv") $
            Let x1 (ConcatMap (\x -> [x + 1]) (Var x0)) $
            Let x2 (ConcatMap (\x -> [x * 2]) (Var x0)) $
            Let x3 (Concat [Var x1, Var x2]) $
            Return (WriteFile "output.csv" (Var x3))
   where
-    x0 = Name 0 :: Name Int Int
-    x1 = Name 1
-    x2 = Name 2
-    x3 = Name 3 :: Name Int Int
+    x0 = Name "x0" :: Name String Int
+    x1 = Name "x1"
+    x2 = Name "x2"
+    x3 = Name "x3" :: Name String Int
 
 ------------------------------------------------------------------------
 
@@ -209,7 +209,7 @@ example2 =
     Let jtag2  (ConcatMap (tag 2) (Var d)) $
     Let gmap   (ConcatMap kv_add1 (Var i4)) $
     Let ggbk   (GroupByKey (Var gmap)) $
-    Let gcv    (FoldValues (+) (Var ggbk)) $
+    Let gcv    (FoldValues (+) 0 (Var ggbk)) $
     Let e      (ConcatMap untag (Var gcv)) $
     Let jtag3  (ConcatMap (tag 3) (Var e)) $
     Let jfltn  (Concat [Var jtag1, Var jtag2, Var jtag3]) $

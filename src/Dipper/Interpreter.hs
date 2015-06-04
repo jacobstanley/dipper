@@ -1,5 +1,6 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE RecursiveDo #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
@@ -13,9 +14,11 @@ import           Data.Binary.Put
 import qualified Data.ByteString as S
 import           Data.ByteString.Builder
 import qualified Data.ByteString.Lazy as L
+import           Data.Dynamic
 import           Data.Int (Int64)
-import           Data.Map (Map)
-import qualified Data.Map as M
+import           Data.List (groupBy, foldl')
+import           Data.Map.Strict (Map)
+import qualified Data.Map.Strict as M
 import           Data.Maybe (maybeToList)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
@@ -28,20 +31,99 @@ import           Dipper.Types
 
 ------------------------------------------------------------------------
 
-data File = File FilePath RowFormat RowType
+data File = File FilePath Tag RowFormat RowType
     deriving (Eq, Ord, Show)
 
 data MSCR = MSCR {
     mscrInputs  :: [File]
   , mscrOutputs :: [File]
-  , mscrMapper  :: L.ByteString -> L.ByteString
-  , mscrReducer :: L.ByteString -> L.ByteString
+  , mscrMapper  :: [TaggedRow] -> [TaggedRow]
+  , mscrReducer :: [TaggedRow] -> [TaggedRow]
   }
+
+instance Show MSCR where
+    showsPrec p MSCR{..} =
+        showParen (p > 10) $ showString "MSCR "
+                           . showsPrec 11 mscrInputs
+                           . showString " "
+                           . showsPrec 11 mscrOutputs
 
 ------------------------------------------------------------------------
 
-interpret :: Term n () -> MSCR
-interpret _ = undefined
+test = decodeTagged schema (encodeTagged schema (take 10 xs))
+  where
+    xs = cycle [ 67 :*: "abcdefg" :*: S.empty
+               , 67 :*: "123"     :*: S.empty
+               , 22 :*: "1234"    :*: "Hello World!" ]
+
+    schema = M.fromList [ (67, VarVInt :*: Fixed 0)
+                        , (22, Fixed 4 :*: VarWord32be) ]
+
+test1 = mscrMapper (interpret example1) xs
+  where
+    xs = [ 0 :*: "" :*: "00000000"
+         , 0 :*: "" :*: "00000001"
+         , 0 :*: "" :*: "00000002"
+         , 0 :*: "" :*: "00000003"
+         , 0 :*: "" :*: "00000004"
+         , 0 :*: "" :*: "00000005"
+         ]
+
+test2 = mscrMapper (interpret example2) (take 10 xs)
+  where
+    xs = cycle [ 0 :*: "" :*: "00000000"
+               , 1 :*: "" :*: "11111111"
+               , 2 :*: "" :*: "22222222"
+               , 3 :*: "" :*: "33333333"
+               ]
+
+------------------------------------------------------------------------
+
+interpret :: Term String () -> MSCR
+interpret term = MSCR{..}
+  where
+    mscrInputs      = readsOfTerm  0 term
+    mscrOutputs     = writesOfTerm 0 term
+    mscrMapper rows = evalTerm M.empty
+                    . replaceWrites freshNames
+                    $ replaceReads rows term
+
+evalTerm :: (Ord n, Show n) => Map n Dynamic -> Term n TaggedRow -> [TaggedRow]
+evalTerm env term = case term of
+    Let (Name n) tl tm ->
+      let
+          env' = M.insert n (toDyn (evalTail env tl)) env
+      in
+          evalTerm env' tm
+
+    Return tl -> evalTail env tl
+    Run _  _  -> error ("evalTerm: cannot eval: " ++ show term)
+
+evalTail :: forall n a. (Ord n, Show n) => Map n Dynamic -> Tail n a -> [a]
+evalTail env tl = case tl of
+    Concat        xss -> concatMap resolve xss
+    ConcatMap   f  xs -> concatMap f (resolve xs)
+    GroupByKey     xs -> group (resolve xs)
+    FoldValues f x xs -> fold f x (resolve xs)
+    ReadFile  _       -> error ("evalTail: cannot eval: " ++ show tl)
+    WriteFile _ _     -> error ("evalTail: cannot eval: " ++ show tl)
+  where
+    resolve :: (Ord n, Show n) => Atom n b -> [b]
+    resolve (Var (Name n)) = unsafeDynLookup "evalTail" n env
+    resolve (Const xs)     = xs
+
+    fold :: (v -> v -> v) -> v -> [k :*: [v]] -> [k :*: v]
+    fold f x xs = map (\(k :*: vs) -> k :*: foldl' f x vs) xs
+
+    group :: Eq k => [k :*: v] -> [k :*: [v]]
+    group = map fixGroup . groupBy keyEq
+
+    keyEq :: Eq k => k :*: v -> k :*: v -> Bool
+    keyEq (x :*: _) (y :*: _) = x == y
+
+    fixGroup :: [k :*: v] -> k :*: [v]
+    fixGroup []                = error "evalTail: groupBy yielded empty list: impossible"
+    fixGroup ((k :*: v) : kvs) = k :*: (v : map snd' kvs)
 
 ------------------------------------------------------------------------
 
@@ -116,39 +198,36 @@ replaceWritesOfTail tag tl = case tl of
 
 ------------------------------------------------------------------------
 
-readsOfTerm :: Term n a -> [n :*: File]
-readsOfTerm term = case term of
+readsOfTerm :: Tag -> Term n a -> [File]
+readsOfTerm tag term = case term of
     Let (Name n) (ReadFile path :: Tail n b) tm ->
 
-        (n :*: File path (rowFormat (undefined :: b))
-                         (rowType   (undefined :: b))) : readsOfTerm tm
+      let
+          tag' = nextTag "readsOfTerm" tag
+      in
+          (File path tag (rowFormat (undefined :: b))
+                         (rowType   (undefined :: b))) : readsOfTerm tag' tm
 
-    Let _  _ tm -> readsOfTerm tm
-    Run    _ tm -> readsOfTerm tm
+    Let _  _ tm -> readsOfTerm tag tm
+    Run    _ tm -> readsOfTerm tag tm
     Return _    -> []
 
-writesOfTerm :: Term n a -> [File]
-writesOfTerm term = case term of
-    Run    tl tm -> maybeToList (writesOfTail tl) ++ writesOfTerm tm
-    Let _  tl tm -> maybeToList (writesOfTail tl) ++ writesOfTerm tm
-    Return tl    -> maybeToList (writesOfTail tl)
-
-writesOfTail :: Tail n a -> Maybe File
-writesOfTail tl = case tl of
-    WriteFile path (xs :: Atom n b) -> Just (File path (rowFormat (undefined :: b))
-                                                       (rowType   (undefined :: b)))
-    _                               -> Nothing
-
-------------------------------------------------------------------------
-
-test = decodeTagged schema (encodeTagged schema (take 10 xs))
+writesOfTerm :: Tag -> Term n a -> [File]
+writesOfTerm tag term = case term of
+    Run    tl tm -> go (writesOfTail tag tl) (\tg -> writesOfTerm tg tm)
+    Let _  tl tm -> go (writesOfTail tag tl) (\tg -> writesOfTerm tg tm)
+    Return tl    -> go (writesOfTail tag tl) (const [])
   where
-    xs = cycle [ 67 :*: "abcdefg" :*: S.empty
-               , 67 :*: "123"     :*: S.empty
-               , 22 :*: "1234"    :*: "Hello World!" ]
+    go (Just file) f = [file] ++ f tag'
+    go Nothing     f = f tag
 
-    schema = M.fromList [ (67, VarVInt :*: Fixed 0)
-                        , (22, Fixed 4 :*: VarWord32be) ]
+    tag' = nextTag "writesOfTerm" tag
+
+writesOfTail :: Tag -> Tail n a -> Maybe File
+writesOfTail tag tl = case tl of
+    WriteFile path (xs :: Atom n b) -> Just (File path tag (rowFormat (undefined :: b))
+                                                           (rowType   (undefined :: b)))
+    _                               -> Nothing
 
 ------------------------------------------------------------------------
 
