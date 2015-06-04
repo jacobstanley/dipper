@@ -32,19 +32,28 @@ type RowFormat = ByteFormat :*: ByteFormat
 
 type TaggedRow = Tag :*: S.ByteString :*: S.ByteString
 
+hasTag :: Tag -> TaggedRow -> Bool
+hasTag tag (tag' :*: _) = tag == tag'
+
 ------------------------------------------------------------------------
 
 class Row a where
     rowFormat :: a -> RowFormat
     rowType   :: a -> RowType
+    encodeRow :: a -> S.ByteString :*: S.ByteString
+    decodeRow :: S.ByteString :*: S.ByteString -> a
 
 instance {-# OVERLAPPABLE #-} HadoopWritable a => Row a where
-    rowFormat _ = byteFormat () :*: byteFormat (undefined :: a)
-    rowType   _ = hadoopType () :*: hadoopType (undefined :: a)
+    rowFormat  _        = byteFormat () :*: byteFormat (undefined :: a)
+    rowType    _        = hadoopType () :*: hadoopType (undefined :: a)
+    encodeRow        x  = encode     () :*: encode x
+    decodeRow (_ :*: x) = decode x
 
 instance {-# OVERLAPPING #-} (HadoopWritable k, HadoopWritable v) => Row (k :*: v) where
-    rowFormat _ = byteFormat (undefined :: v) :*: byteFormat (undefined :: v)
-    rowType   _ = hadoopType (undefined :: v) :*: hadoopType (undefined :: v)
+    rowFormat  _        = byteFormat (undefined :: v) :*: byteFormat (undefined :: v)
+    rowType    _        = hadoopType (undefined :: v) :*: hadoopType (undefined :: v)
+    encodeRow (x :*: y) = encode x :*: encode y
+    decodeRow (x :*: y) = decode x :*: decode y
 
 ------------------------------------------------------------------------
 
@@ -113,6 +122,10 @@ data a :*: b = !a :*: !b
 
 data a :+: b = L !a | R !b
   deriving (Eq, Ord, Show, Typeable)
+
+snd' :: a :*: b -> b
+snd' (_ :*: x) = x
+{-# INLINE snd' #-}
 
 -- | Sequence actions and put their resulting values into a strict product.
 (<&>) :: Applicative f => f a -> f b -> f (a :*: b)
