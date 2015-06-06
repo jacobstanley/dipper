@@ -4,6 +4,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 module Dipper.Types where
 
@@ -17,6 +18,8 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import           Data.Typeable (Typeable, typeOf)
 import           Data.Word (Word8)
+
+import           Dipper.Binary
 
 ------------------------------------------------------------------------
 
@@ -32,8 +35,27 @@ type RowFormat = ByteFormat :*: ByteFormat
 
 type TaggedRow = Tag :*: S.ByteString :*: S.ByteString
 
+------------------------------------------------------------------------
+
 hasTag :: Tag -> TaggedRow -> Bool
 hasTag tag (tag' :*: _) = tag == tag'
+
+getFormatted :: ByteFormat -> Get S.ByteString
+getFormatted VarVInt     = getByteString =<< getVInt
+getFormatted VarWord32be = getByteString . fromIntegral =<< getWord32be
+getFormatted (Fixed n)   = getByteString n
+
+putFormatted :: ByteFormat -> S.ByteString -> Put
+putFormatted fmt bs = case fmt of
+    VarVInt                 -> putVInt     len  >> putByteString bs
+    VarWord32be             -> putWord32be lenW >> putByteString bs
+    (Fixed n)   | n == len  -> putByteString bs
+                | otherwise -> fail ("putTagged: incorrect tag size: "
+                                  ++ "expected <" ++ show n ++ " bytes> "
+                                  ++ "but was <" ++ show len ++ " bytes>")
+  where
+    len  = S.length bs
+    lenW = fromIntegral (S.length bs)
 
 ------------------------------------------------------------------------
 
@@ -54,6 +76,12 @@ instance {-# OVERLAPPING #-} (HadoopWritable k, HadoopWritable v) => Row (k :*: 
     rowType    _        = hadoopType (undefined :: v) :*: hadoopType (undefined :: v)
     encodeRow (x :*: y) = encode x :*: encode y
     decodeRow (x :*: y) = decode x :*: decode y
+
+instance {-# OVERLAPPING #-} (HadoopWritable k, HadoopWritable v) => Row (k :*: [v]) where
+    rowFormat  _         = byteFormat (undefined :: v) :*: byteFormat (undefined :: [v])
+    rowType    _         = hadoopType (undefined :: v) :*: hadoopType (undefined :: [v])
+    encodeRow (x :*: ys) = encode x :*: encode ys
+    decodeRow (x :*: ys) = decode x :*: decode ys
 
 ------------------------------------------------------------------------
 
@@ -93,12 +121,6 @@ instance HadoopWritable Int64 where
     encode       = L.toStrict . runPut . putWord64be . fromIntegral
     decode       = runGet (fromIntegral <$> getWord64be) . L.fromStrict
 
-instance HadoopWritable String where
-    hadoopType _ = "org.apache.hadoop.io.Text"
-    byteFormat _ = VarVInt
-    encode       = T.encodeUtf8 . T.pack
-    decode       = T.unpack . T.decodeUtf8
-
 instance HadoopWritable T.Text where
     hadoopType _ = "org.apache.hadoop.io.Text"
     byteFormat _ = VarVInt
@@ -110,6 +132,23 @@ instance HadoopWritable S.ByteString where
     byteFormat _ = VarWord32be
     encode       = id
     decode       = id
+
+instance forall a. HadoopWritable a => HadoopWritable [a] where
+    hadoopType _ = "org.apache.hadoop.io.BytesWritable"
+    byteFormat _ = VarWord32be
+    encode       = S.concat . map encode
+
+    -- TODO likely pretty slow
+    decode bs = flip runGet (L.fromStrict bs) getAll
+      where
+        getAll = do
+          empty <- isEmpty
+          if empty
+             then return []
+             else do
+               x  <- decode <$> getFormatted (byteFormat (undefined :: a))
+               xs <- getAll
+               return (x : xs)
 
 ------------------------------------------------------------------------
 
@@ -171,7 +210,7 @@ data Tail n a where
                -> Tail n b
 
     -- | GroupByKey from the FlumeJava paper.
-    GroupByKey :: (Typeable n, Typeable k, Typeable v, Eq k)
+    GroupByKey :: (Typeable n, Typeable k, Typeable v, Eq k, HadoopWritable k, HadoopWritable v)
                => Atom n (k :*:  v )
                -> Tail n (k :*: [v])
 
@@ -181,12 +220,6 @@ data Tail n a where
                -> v
                -> Atom n (k :*: [v])
                -> Tail n (k :*:  v )
-
-    -- | Merge two streams of values.
-    Merge      :: (Typeable n, Typeable a, Typeable b)
-               => Atom n a
-               -> Atom n b
-               -> Tail n (a :*: b)
 
     -- | Read from a file.
     ReadFile   :: (Typeable n, Typeable a, Row a)

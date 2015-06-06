@@ -16,7 +16,7 @@ import           Data.ByteString.Builder
 import qualified Data.ByteString.Lazy as L
 import           Data.Dynamic
 import           Data.Int (Int64)
-import           Data.List (groupBy, foldl')
+import           Data.List (groupBy, foldl', sort)
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 import           Data.Maybe (maybeToList)
@@ -31,14 +31,18 @@ import           Dipper.Types
 
 ------------------------------------------------------------------------
 
-data File = File FilePath Tag RowFormat RowType
+data RowDesc = RowDesc Tag RowFormat RowType
+    deriving (Eq, Ord, Show)
+
+data File = File FilePath RowDesc
     deriving (Eq, Ord, Show)
 
 data MSCR = MSCR {
-    mscrInputs  :: [File]
-  , mscrOutputs :: [File]
-  , mscrMapper  :: [TaggedRow] -> [TaggedRow]
-  , mscrReducer :: [TaggedRow] -> [TaggedRow]
+    mscrInputs   :: [File]
+  , mscrShuffles :: [RowDesc]
+  , mscrOutputs  :: [File]
+  , mscrMapper   :: [TaggedRow] -> [TaggedRow]
+  , mscrReducer  :: [TaggedRow] -> [TaggedRow]
   }
 
 instance Show MSCR where
@@ -50,7 +54,21 @@ instance Show MSCR where
 
 ------------------------------------------------------------------------
 
-test = decodeTagged schema (encodeTagged schema (take 10 xs))
+{-
+xs :: [Maybe a]
+ys :: [Maybe a]
+merge [xs, ys] :: [Maybe a]
+
+data Consumer a m b = Consumer (a -> m b)
+
+xs :: Consumer () IO (Maybe a)
+ys :: Consumer () IO (Maybe a)
+merge xs ys :: Consumer () IO (Maybe a)
+-}
+
+------------------------------------------------------------------------
+
+test = take 10 (decodeTagged schema (encodeTagged schema xs))
   where
     xs = cycle [ 67 :*: "abcdefg" :*: S.empty
                , 67 :*: "123"     :*: S.empty
@@ -59,22 +77,35 @@ test = decodeTagged schema (encodeTagged schema (take 10 xs))
     schema = M.fromList [ (67, VarVInt :*: Fixed 0)
                         , (22, Fixed 4 :*: VarWord32be) ]
 
-test1 = mscrMapper (interpret example1) xs
+test1 = mscrMapper (interpret example1) (sort (take 10 xs))
   where
-    xs = [ 0 :*: "" :*: "00000000"
-         , 0 :*: "" :*: "00000001"
-         , 0 :*: "" :*: "00000002"
-         , 0 :*: "" :*: "00000003"
-         , 0 :*: "" :*: "00000004"
-         , 0 :*: "" :*: "00000005"
-         ]
+    xs = cycle [ 0 :*: "" :*: "00000000"
+               , 0 :*: "" :*: "00000001"
+               , 0 :*: "" :*: "00000002"
+               , 0 :*: "" :*: "00000003"
+               , 0 :*: "" :*: "00000004"
+               , 0 :*: "" :*: "00000005"
+               ]
 
-test2 = mscrMapper (interpret example2) (take 10 xs)
+test2 = mscrMapper (interpret example2) (sort (take 10 xs))
   where
     xs = cycle [ 0 :*: "" :*: "00000000"
                , 1 :*: "" :*: "11111111"
                , 2 :*: "" :*: "22222222"
                , 3 :*: "" :*: "33333333"
+               ]
+
+test3 = mscrMapper (interpret example3) (sort (take 10 xs))
+  where
+    xs = cycle [ 0 :*: "X" :*: "       1"
+               , 1 :*: "X" :*: "       2"
+               , 2 :*: "X" :*: "       3"
+               , 0 :*: "Y" :*: "      10"
+               , 1 :*: "Y" :*: "      20"
+               , 2 :*: "Y" :*: "      30"
+               , 0 :*: "Z" :*: "     100"
+               , 1 :*: "Z" :*: "     200"
+               , 2 :*: "Z" :*: "     300"
                ]
 
 ------------------------------------------------------------------------
@@ -86,7 +117,11 @@ interpret term = MSCR{..}
     mscrOutputs     = writesOfTerm 0 term
     mscrMapper rows = evalTerm M.empty
                     . replaceWrites freshNames
-                    $ replaceReads rows term
+                    . replaceReads rows
+                    . removeGroups
+                    $ term
+
+------------------------------------------------------------------------
 
 evalTerm :: (Ord n, Show n) => Map n Dynamic -> Term n TaggedRow -> [TaggedRow]
 evalTerm env term = case term of
@@ -127,6 +162,22 @@ evalTail env tl = case tl of
 
 ------------------------------------------------------------------------
 
+removeGroups :: Term n () -> Term n ()
+removeGroups term = case term of
+    Let n (GroupByKey kvs) tm ->
+
+      let
+          o = Run   (WriteFile "SHUFFLE" kvs)
+          i = Let n (ReadFile "SHUFFLE")
+      in
+          o (i (removeGroups tm))
+
+    Let  n tl tm -> Let  n tl (removeGroups tm)
+    Run    tl tm -> Run    tl (removeGroups tm)
+    Return tl    -> Return tl
+
+------------------------------------------------------------------------
+
 replaceReads :: [TaggedRow] -> Term n a -> Term n a
 replaceReads = replaceReadsOfTerm 0
 
@@ -137,7 +188,7 @@ replaceReadsOfTerm tag rows term = case term of
       let
           xs :: [b]
           xs = map (decodeRow . snd')
-                   (filter (hasTag tag) rows)
+             $ filter (hasTag tag) rows
 
           tag' = nextTag "replaceReadsOfTerm" tag
       in
@@ -204,13 +255,16 @@ readsOfTerm tag term = case term of
 
       let
           tag' = nextTag "readsOfTerm" tag
+          desc = RowDesc tag (rowFormat (undefined :: b))
+                             (rowType   (undefined :: b))
       in
-          (File path tag (rowFormat (undefined :: b))
-                         (rowType   (undefined :: b))) : readsOfTerm tag' tm
+          (File path desc) : readsOfTerm tag' tm
 
     Let _  _ tm -> readsOfTerm tag tm
     Run    _ tm -> readsOfTerm tag tm
     Return _    -> []
+
+------------------------------------------------------------------------
 
 writesOfTerm :: Tag -> Term n a -> [File]
 writesOfTerm tag term = case term of
@@ -225,9 +279,15 @@ writesOfTerm tag term = case term of
 
 writesOfTail :: Tag -> Tail n a -> Maybe File
 writesOfTail tag tl = case tl of
-    WriteFile path (xs :: Atom n b) -> Just (File path tag (rowFormat (undefined :: b))
-                                                           (rowType   (undefined :: b)))
-    _                               -> Nothing
+    WriteFile path (xs :: Atom n b) ->
+
+      let
+          desc = RowDesc tag (rowFormat (undefined :: b))
+                             (rowType   (undefined :: b))
+      in
+          Just (File path desc)
+
+    _ -> Nothing
 
 ------------------------------------------------------------------------
 
@@ -254,20 +314,3 @@ putTagged schema (tag :*: k :*: v) =
     case M.lookup tag schema of
       Nothing              -> fail ("putTagged: invalid tag <" ++ show tag ++ ">")
       Just (kFmt :*: vFmt) -> putWord8 tag >> putFormatted kFmt k >> putFormatted vFmt v
-
-getFormatted :: ByteFormat -> Get S.ByteString
-getFormatted VarVInt     = getByteString =<< getVInt
-getFormatted VarWord32be = getByteString . fromIntegral =<< getWord32be
-getFormatted (Fixed n)   = getByteString n
-
-putFormatted :: ByteFormat -> S.ByteString -> Put
-putFormatted fmt bs = case fmt of
-    VarVInt                 -> putVInt     len  >> putByteString bs
-    VarWord32be             -> putWord32be lenW >> putByteString bs
-    (Fixed n)   | n == len  -> putByteString bs
-                | otherwise -> fail ("putTagged: incorrect tag size: "
-                                  ++ "expected <" ++ show n ++ " bytes> "
-                                  ++ "but was <" ++ show len ++ " bytes>")
-  where
-    len  = S.length bs
-    lenW = fromIntegral (S.length bs)

@@ -14,6 +14,8 @@ module Dipper.AST where
 import           Data.Dynamic
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
+import           Data.Text (Text)
+import qualified Data.Text as T
 
 import           Dipper.Types
 
@@ -222,7 +224,7 @@ example2 =
     add1 :: Int -> [Int]
     add1 x = [x+1]
 
-    kv_add1 :: String :*: Int -> [String :*: Int]
+    kv_add1 :: Text :*: Int -> [Text :*: Int]
     kv_add1 (k :*: v) = [k :*: v+1]
 
     tag :: Int -> a -> [Int :*: a]
@@ -259,6 +261,30 @@ example2 =
 
     write1 = "Write1"
     write2 = "Write2"
+
+------------------------------------------------------------------------
+
+example3 :: Term String ()
+example3 =
+    Let input1  (ReadFile "in-1.csv") $
+    Let input2  (ReadFile "in-2.csv") $
+    Let input3  (ReadFile "in-3.csv") $
+    Let concat1 (Concat [Var input1, Var input2]) $
+    Let concat2 (Concat [Var input2, Var input3]) $
+    Let text1   (ConcatMap (\(k :*: v) -> [k :*: T.pack (show v)]) (Var concat1)) $
+    Let gbk1    (GroupByKey (Var text1)) $
+    Let gbk2    (GroupByKey (Var concat2)) $
+    Run         (WriteFile "out-1.csv" (Var gbk1)) $
+    Return      (WriteFile "out-2.csv" (Var gbk2))
+  where
+    input1  = "input1" :: Name String (Text :*: Int)
+    input2  = "input2"
+    input3  = "input3"
+    text1   = "text1"
+    concat1 = "concat1"
+    concat2 = "concat2"
+    gbk1    = "gbk1" :: Name String (Text :*: [Text])
+    gbk2    = "gbk2" :: Name String (Text :*: [Int])
 
 ------------------------------------------------------------------------
 -- Utils
