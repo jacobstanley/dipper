@@ -70,8 +70,8 @@ sinkConcatOfTerm fresh env term = case term of
             Let (Name n) tl (sinkConcatOfTerm fresh env' tm)
 
 
-    Run    tl tm -> Run    tl (sinkConcatOfTerm fresh env tm)
-    Return tl    -> Return tl
+    Run tl tm -> Run tl (sinkConcatOfTerm fresh env tm)
+    Ret tl    -> Ret tl
 
 ------------------------------------------------------------------------
 
@@ -104,12 +104,14 @@ renameTail :: (Ord a, Show a, Show b, Typeable b)
            -> Tail a r
            -> Tail b r
 renameTail names tl = case tl of
-    Concat        xs -> Concat         (map (renameAtom names) xs)
-    ConcatMap  f   x -> ConcatMap  f   (renameAtom names x)
-    GroupByKey     x -> GroupByKey     (renameAtom names x)
-    FoldValues f s x -> FoldValues f s (renameAtom names x)
-    ReadFile  path   -> ReadFile  path
-    WriteFile path x -> WriteFile path (renameAtom names x)
+    Concat        xs     -> Concat         (map (renameAtom names) xs)
+    ConcatMap  f   x     -> ConcatMap  f   (renameAtom names x)
+    GroupByKey     x     -> GroupByKey     (renameAtom names x)
+    FoldValues f s x     -> FoldValues f s (renameAtom names x)
+    MapperInput   path   -> MapperInput   path
+    ReducerInput  tag    -> ReducerInput  tag
+    MapperOutput  tag  x -> MapperOutput  tag  (renameAtom names x)
+    ReducerOutput path x -> ReducerOutput path (renameAtom names x)
 
 renameTerm :: (Ord n, Show n, Show m, Typeable m)
            => [m]
@@ -136,12 +138,12 @@ renameTerm gen0 names term = case term of
         in
             (gen1, Run tl' tm')
 
-    Return tl ->
+    Ret tl ->
 
         let
             tl' = renameTail names tl
         in
-            (gen0, Return tl')
+            (gen0, Ret tl')
 
 ------------------------------------------------------------------------
 
@@ -162,12 +164,14 @@ substTail :: (Ord n, Show n)
           -> Tail n a
           -> Tail n a
 substTail subs tl = case tl of
-    Concat        xs -> Concat         (map (substAtom subs) xs)
-    ConcatMap  f   x -> ConcatMap  f   (substAtom subs x)
-    GroupByKey     x -> GroupByKey     (substAtom subs x)
-    FoldValues f s x -> FoldValues f s (substAtom subs x)
-    ReadFile  path   -> ReadFile  path
-    WriteFile path x -> WriteFile path (substAtom subs x)
+    Concat        xs     -> Concat         (map (substAtom subs) xs)
+    ConcatMap  f   x     -> ConcatMap  f   (substAtom subs x)
+    GroupByKey     x     -> GroupByKey     (substAtom subs x)
+    FoldValues f s x     -> FoldValues f s (substAtom subs x)
+    MapperInput   path   -> MapperInput   path
+    ReducerInput  tag    -> ReducerInput  tag
+    MapperOutput  tag  x -> MapperOutput  tag  (substAtom subs x)
+    ReducerOutput path x -> ReducerOutput path (substAtom subs x)
 
 substTerm :: (Ord n, Show n)
           => Map n Dynamic -- Dynamic :: Atom n _
@@ -176,16 +180,16 @@ substTerm :: (Ord n, Show n)
 substTerm subs term = case term of
     Let (Name n) tl tm -> Let (Name n) (substTail subs tl) (substTerm (M.delete n subs) tm)
     Run          tl tm -> Run          (substTail subs tl) (substTerm subs tm)
-    Return       tl    -> Return       (substTail subs tl)
+    Ret          tl    -> Ret          (substTail subs tl)
 
 ------------------------------------------------------------------------
 
 example1 :: Term String ()
-example1 = Let x0 (ReadFile "input.csv") $
+example1 = Let x0 (MapperInput "input.csv") $
            Let x1 (ConcatMap (\x -> [x + 1]) (Var x0)) $
            Let x2 (ConcatMap (\x -> [x * 2]) (Var x0)) $
            Let x3 (Concat [Var x1, Var x2]) $
-           Return (WriteFile "output.csv" (Var x3))
+           Ret    (ReducerOutput "output.csv" (Var x3))
   where
     x0 = Name "x0" :: Name String Int
     x1 = Name "x1"
@@ -196,13 +200,13 @@ example1 = Let x0 (ReadFile "input.csv") $
 
 example2 :: Term String ()
 example2 =
-    Let i1     (ReadFile "input1") $
-    Let i2     (ReadFile "input2") $
-    Let i3     (ReadFile "input3") $
-    Let i4     (ReadFile "input4") $
+    Let i1     (MapperInput "input1") $
+    Let i2     (MapperInput "input2") $
+    Let i3     (MapperInput "input3") $
+    Let i4     (MapperInput "input4") $
     Let a      (ConcatMap add1 (Var i1)) $
     Let write1 (ConcatMap add1 (Var a)) $
-    Run        (WriteFile "output1" (Var write1)) $
+    Run        (ReducerOutput "output1" (Var write1)) $
     Let jtag1  (ConcatMap (tag 1) (Var a)) $
     Let b      (ConcatMap add1 (Var i2)) $
     Let c      (ConcatMap add1 (Var i3)) $
@@ -219,7 +223,7 @@ example2 =
     Let juntag (ConcatMap untag (Var jgbk)) $
     Let f      (ConcatMap id (Var juntag)) $
     Let write2 (Concat [Var f]) $
-    Return     (WriteFile "output2" (Var write2))
+    Ret        (ReducerOutput "output2" (Var write2))
   where
     add1 :: Int -> [Int]
     add1 x = [x+1]
@@ -266,16 +270,16 @@ example2 =
 
 example3 :: Term String ()
 example3 =
-    Let input1  (ReadFile "in-1.csv") $
-    Let input2  (ReadFile "in-2.csv") $
-    Let input3  (ReadFile "in-3.csv") $
+    Let input1  (MapperInput "in-1.csv") $
+    Let input2  (MapperInput "in-2.csv") $
+    Let input3  (MapperInput "in-3.csv") $
     Let concat1 (Concat [Var input1, Var input2]) $
     Let concat2 (Concat [Var input2, Var input3]) $
     Let text1   (ConcatMap (\(k :*: v) -> [k :*: T.pack (show v)]) (Var concat1)) $
     Let gbk1    (GroupByKey (Var text1)) $
     Let gbk2    (GroupByKey (Var concat2)) $
-    Run         (WriteFile "out-1.csv" (Var gbk1)) $
-    Return      (WriteFile "out-2.csv" (Var gbk2))
+    Run         (ReducerOutput "out-1.csv" (Var gbk1)) $
+    Ret         (ReducerOutput "out-2.csv" (Var gbk2))
   where
     input1  = "input1" :: Name String (Text :*: Int)
     input2  = "input2"

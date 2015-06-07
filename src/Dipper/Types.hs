@@ -12,7 +12,8 @@ import           Data.Binary.Get
 import           Data.Binary.Put
 import qualified Data.ByteString as S
 import qualified Data.ByteString.Lazy as L
-import           Data.Int (Int64)
+import           Data.Int (Int32, Int64)
+import           Data.Word (Word8)
 import           Data.String (IsString(..))
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
@@ -22,32 +23,37 @@ import           Dipper.Binary
 
 ------------------------------------------------------------------------
 
-data ByteFormat =
+type HadoopType = T.Text
+
+data ByteLayout =
       VarVInt      -- ^ Variable length, prefixed by Hadoop-style vint
     | VarWord32be  -- ^ Variable length, prefixed by 32-bit big-endian integer
     | Fixed Int    -- ^ Fixed length, always 'n' bytes
   deriving (Eq, Ord, Show)
 
-type KVFormat = ByteFormat :*: ByteFormat
-
-type Row a = a :*: S.ByteString :*: S.ByteString
+data Format = Format {
+    fmtType   :: !HadoopType
+  , fmtLayout :: !ByteLayout
+  } deriving (Eq, Ord, Show)
 
 ------------------------------------------------------------------------
+
+type Row a = a :*: S.ByteString :*: S.ByteString
 
 hasTag :: Eq a => a -> Row a -> Bool
 hasTag tag (tag' :*: _) = tag == tag'
 
-getFormatted :: ByteFormat -> Get S.ByteString
-getFormatted VarVInt     = getByteString =<< getVInt
-getFormatted VarWord32be = getByteString . fromIntegral =<< getWord32be
-getFormatted (Fixed n)   = getByteString n
+getLayout :: ByteLayout -> Get S.ByteString
+getLayout VarVInt     = getByteString =<< getVInt
+getLayout VarWord32be = getByteString . fromIntegral =<< getWord32be
+getLayout (Fixed n)   = getByteString n
 
-putFormatted :: ByteFormat -> S.ByteString -> Put
-putFormatted fmt bs = case fmt of
+putLayout :: ByteLayout -> S.ByteString -> Put
+putLayout fmt bs = case fmt of
     VarVInt                 -> putVInt     len  >> putByteString bs
     VarWord32be             -> putWord32be lenW >> putByteString bs
     (Fixed n)   | n == len  -> putByteString bs
-                | otherwise -> fail ("putTagged: incorrect tag size: "
+                | otherwise -> fail ("putLayout: incorrect size: "
                                   ++ "expected <" ++ show n ++ " bytes> "
                                   ++ "but was <" ++ show len ++ " bytes>")
   where
@@ -56,35 +62,33 @@ putFormatted fmt bs = case fmt of
 
 ------------------------------------------------------------------------
 
+type KVFormat = Format :*: Format
+
 class KV a where
     kvFormat  :: a -> KVFormat
-    kvType    :: a -> KVType
     encodeRow :: a -> S.ByteString :*: S.ByteString
     decodeRow :: S.ByteString :*: S.ByteString -> a
 
 instance {-# OVERLAPPABLE #-} HadoopWritable a => KV a where
-    kvFormat  _        = byteFormat () :*: byteFormat (undefined :: a)
-    kvType    _        = hadoopType () :*: hadoopType (undefined :: a)
+    kvFormat  _         = format () :*: format (undefined :: a)
     encodeRow        x  = encode     () :*: encode x
     decodeRow (_ :*: x) = decode x
 
 instance {-# OVERLAPPING #-} (HadoopWritable k, HadoopWritable v) => KV (k :*: v) where
-    kvFormat  _        = byteFormat (undefined :: v) :*: byteFormat (undefined :: v)
-    kvType    _        = hadoopType (undefined :: v) :*: hadoopType (undefined :: v)
+    kvFormat  _         = format (undefined :: v) :*: format (undefined :: v)
     encodeRow (x :*: y) = encode x :*: encode y
     decodeRow (x :*: y) = decode x :*: decode y
 
 instance {-# OVERLAPPING #-} (HadoopWritable k, HadoopWritable v) => KV (k :*: [v]) where
-    kvFormat  _         = byteFormat (undefined :: v) :*: byteFormat (undefined :: [v])
-    kvType    _         = hadoopType (undefined :: v) :*: hadoopType (undefined :: [v])
+    kvFormat  _          = format (undefined :: v) :*: format (undefined :: [v])
     encodeRow (x :*: ys) = encode x :*: encode ys
     decodeRow (x :*: ys) = decode x :*: decode ys
 
 ------------------------------------------------------------------------
 
-type HadoopType = T.Text
-
-type KVType = HadoopType :*: HadoopType
+format :: forall a. HadoopWritable a => a -> Format
+format _ = Format (hadoopType (undefined :: a))
+                  (byteLayout (undefined :: a))
 
 -- | Implementations should match `org.apache.hadoop.io.HadoopWritable` where
 -- possible.
@@ -94,7 +98,7 @@ class HadoopWritable a where
     hadoopType :: a -> HadoopType
 
     -- | Describes the binary layout (i.e. variable vs fixed length)
-    byteFormat :: a -> ByteFormat
+    byteLayout :: a -> ByteLayout
 
     -- TODO Horrible, more efficiency to be had here
     encode :: a -> S.ByteString
@@ -102,37 +106,43 @@ class HadoopWritable a where
 
 instance HadoopWritable () where
     hadoopType _ = "org.apache.hadoop.io.NullWritable"
-    byteFormat _ = Fixed 0
+    byteLayout _ = Fixed 0
     encode       = const S.empty
     decode       = const ()
 
+instance HadoopWritable Int32 where
+    hadoopType _ = "org.apache.hadoop.io.IntWritable"
+    byteLayout _ = Fixed 4
+    encode       = L.toStrict . runPut . putWord32be . fromIntegral
+    decode       = runGet (fromIntegral <$> getWord32be) . L.fromStrict
+
 instance HadoopWritable Int where
     hadoopType _ = "org.apache.hadoop.io.LongWritable"
-    byteFormat _ = Fixed 8
+    byteLayout _ = Fixed 8
     encode       = L.toStrict . runPut . putWord64be . fromIntegral
     decode       = runGet (fromIntegral <$> getWord64be) . L.fromStrict
 
 instance HadoopWritable Int64 where
     hadoopType _ = "org.apache.hadoop.io.LongWritable"
-    byteFormat _ = Fixed 8
+    byteLayout _ = Fixed 8
     encode       = L.toStrict . runPut . putWord64be . fromIntegral
     decode       = runGet (fromIntegral <$> getWord64be) . L.fromStrict
 
 instance HadoopWritable T.Text where
     hadoopType _ = "org.apache.hadoop.io.Text"
-    byteFormat _ = VarVInt
+    byteLayout _ = VarVInt
     encode       = T.encodeUtf8
     decode       = T.decodeUtf8
 
 instance HadoopWritable S.ByteString where
     hadoopType _ = "org.apache.hadoop.io.BytesWritable"
-    byteFormat _ = VarWord32be
+    byteLayout _ = VarWord32be
     encode       = id
     decode       = id
 
 instance forall a. HadoopWritable a => HadoopWritable [a] where
     hadoopType _ = "org.apache.hadoop.io.BytesWritable"
-    byteFormat _ = VarWord32be
+    byteLayout _ = VarWord32be
     encode       = S.concat . map encode
 
     -- TODO likely pretty slow
@@ -143,7 +153,7 @@ instance forall a. HadoopWritable a => HadoopWritable [a] where
           if empty
              then return []
              else do
-               x  <- decode <$> getFormatted (byteFormat (undefined :: a))
+               x  <- decode <$> getLayout (byteLayout (undefined :: a))
                xs <- getAll
                return (x : xs)
 
@@ -196,15 +206,15 @@ data Atom n a where
 data Tail n a where
 
     -- | Flatten from the FlumeJava paper.
-    Concat     :: (Typeable n, Typeable a)
-               => [Atom n a]
-               ->  Tail n a
+    Concat :: (Typeable n, Typeable a)
+           => [Atom n a]
+           ->  Tail n a
 
     -- | ParallelDo from the FlumeJava paper.
-    ConcatMap  :: (Typeable n, Typeable a, Typeable b)
-               => (a -> [b])
-               -> Atom n a
-               -> Tail n b
+    ConcatMap :: (Typeable n, Typeable a, Typeable b)
+              => (a -> [b])
+              -> Atom n a
+              -> Tail n b
 
     -- | GroupByKey from the FlumeJava paper.
     GroupByKey :: (Typeable n, Typeable k, Typeable v, Eq k, HadoopWritable k, HadoopWritable v)
@@ -218,16 +228,27 @@ data Tail n a where
                -> Atom n (k :*: [v])
                -> Tail n (k :*:  v )
 
-    -- | Read from a file.
-    ReadFile   :: (Typeable n, Typeable a, KV a)
-               => FilePath
-               -> Tail n a
+    -- | Input to a mapper - read from a file.
+    MapperInput :: (Typeable n, Typeable a, KV a)
+                => FilePath
+                -> Tail n a
 
-    -- | Write to a file
-    WriteFile  :: (Typeable n, Typeable a, KV a)
-               => FilePath
-               -> Atom n a
-               -> Tail n ()
+    -- | Input to a reducer - read from a tag.
+    ReducerInput :: (Typeable n, Typeable a, KV a)
+                 => Word8
+                 -> Tail n a
+
+    -- | Output from a mapper - write to a tag.
+    MapperOutput :: (Typeable n, Typeable a, KV a)
+                 => Word8
+                 -> Atom n a
+                 -> Tail n ()
+
+    -- | Output from a reducer - write to a file
+    ReducerOutput :: (Typeable n, Typeable a, KV a)
+                  => FilePath
+                  -> Atom n a
+                  -> Tail n ()
 
   deriving (Typeable)
 
@@ -247,10 +268,10 @@ data Term n a where
         -> Term n b
         -> Term n b
 
-    -- | End of term.
-    Return :: (Typeable n)
-           => Tail n a
-           -> Term n a
+    -- | Result of term.
+    Ret :: (Typeable n)
+        => Tail n a
+        -> Term n a
 
   deriving (Typeable)
 
@@ -270,16 +291,21 @@ instance Show n => Show (Tail n a) where
                                                     . showString " "
                                                     . showsPrec (app+1) xs
       GroupByKey     xs -> showString "GroupByKey " . showsPrec (app+1) xs
-      FoldValues f x xs -> showString "FoldValue "  . showsPrec (app+1) (typeOf f)
+      FoldValues f x xs -> showString "FoldValues " . showsPrec (app+1) (typeOf f)
                                                     . showString " "
                                                     . showsPrec (app+1) (typeOf x)
                                                     . showString " "
                                                     . showsPrec (app+1) xs
                                                     . showsPrec (app+1) xs
-      ReadFile  path    -> showString "ReadFile "   . showsPrec (app+1) path
-      WriteFile path xs -> showString "WriteFile "  . showsPrec (app+1) path
-                                                    . showString " "
-                                                    . showsPrec (app+1) xs
+
+      MapperInput   path    -> showString "MapperInput "   . showsPrec (app+1) path
+      ReducerInput  tag     -> showString "ReducerInput "  . showsPrec (app+1) tag
+      MapperOutput  tag  xs -> showString "MapperOutput "  . showsPrec (app+1) tag
+                                                           . showString " "
+                                                           . showsPrec (app+1) xs
+      ReducerOutput path xs -> showString "ReducerOutput " . showsPrec (app+1) path
+                                                           . showString " "
+                                                           . showsPrec (app+1) xs
     where
       app = 10
 
@@ -293,7 +319,7 @@ instance Show n => Show (Term n a) where
       Run   tl tm -> showString "Run "    . showsPrec (app+1) tl
                                           . showString "\n"
                                           . showsPrec (app+1) tm
-      Return tl   -> showString "Return " . showsPrec (app+1) tl
+      Ret   tl    -> showString "Ret "    . showsPrec (app+1) tl
     where
       app = 10
 
