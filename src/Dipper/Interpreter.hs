@@ -9,6 +9,7 @@
 
 module Dipper.Interpreter where
 
+import           Control.Monad (mplus)
 import           Data.Binary.Get
 import           Data.Binary.Put
 import qualified Data.ByteString as S
@@ -19,9 +20,9 @@ import           Data.Int (Int32, Int64)
 import           Data.List (groupBy, foldl', sort)
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
+import           Data.Maybe (maybeToList, mapMaybe)
 import           Data.Set (Set)
 import qualified Data.Set as Set
-import           Data.Maybe (maybeToList)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import           Data.Typeable (Typeable)
@@ -42,15 +43,12 @@ data Step i o = Step {
   , sTerm    :: Term String ()
   } deriving (Show)
 
-type MapperName  = FilePath
-type ReducerName = Word8
-
-type Mapper  = Step MapperName ReducerName
-type Reducer = Step ReducerName MapperName
+type Mapper  = Step FilePath Tag
+type Reducer = Step Tag FilePath
 
 data Pipeline = Pipeline {
-    pMappers  :: Map MapperName  Mapper
-  , pReducers :: Map ReducerName Reducer
+    pMappers  :: Map FilePath Mapper
+  , pReducers :: Map Tag Reducer
   } deriving (Show)
 
 ------------------------------------------------------------------------
@@ -60,79 +58,137 @@ mkPipeline = undefined
 
 ------------------------------------------------------------------------
 
---insertMapperOutputs :: Term n a -> Term n a
---insertMapperOutputs term = case term of
---    Let (Name n) (MapperInput _) ->
+fixMapPhase :: Ord n => Term n a -> Term n a
+fixMapPhase term = foldl' go term rOuts
+  where
+    go tm path = passReducerOutput path (nextAvailableTag "fixMapPhase" tm) tm
+
+    rOuts = mapMaybe reducerOutput
+          . Set.toList
+          . dependents (any id) mIns
+          $ term
+
+    mIns = Set.map MapperInput
+         . findNamesOfTerm mapperInput
+         $ term
+
+passReducerOutput :: FilePath -> Tag -> Term n a -> Term n a
+passReducerOutput path tag term = case term of
+    Let n@(ReducerOutput path') tl tm | path == path' ->
+
+       Let (MapperOutput tag) tl $
+       Let n (Concat [Var (ReducerInput tag)]) tm
+
+    Let n tl tm -> Let n tl (passReducerOutput path tag tm)
+    Ret   tl    -> Ret   tl
 
 ------------------------------------------------------------------------
 
-dependencies :: forall a n. Ord n => Set n -> Term n a -> Set n
+nextAvailableTag :: String -> Term n a -> Tag
+nextAvailableTag msg term = case Set.maxView (findNamesOfTerm go term) of
+    Nothing     -> 0
+    Just (x, _) -> nextTag msg x
+  where
+    go n = mapperOutput n `mplus` reducerInput n
+
+nextTag :: String -> Tag -> Tag
+nextTag msg tag | tag /= maxBound = succ tag
+                | otherwise       = error msg'
+  where
+    msg' = msg ++ ": exceeded maximum number of reducers <" ++ show tag ++ ">"
+
+------------------------------------------------------------------------
+
+mapperInput :: Name n a -> Maybe FilePath
+mapperInput (MapperInput x) = Just x
+mapperInput _               = Nothing
+
+mapperOutput :: Name n a -> Maybe Tag
+mapperOutput (MapperOutput x) = Just x
+mapperOutput _                = Nothing
+
+reducerInput :: Name n a -> Maybe Tag
+reducerInput (ReducerInput x) = Just x
+reducerInput _                = Nothing
+
+reducerOutput :: Name n a -> Maybe FilePath
+reducerOutput (ReducerOutput x) = Just x
+reducerOutput _                 = Nothing
+
+------------------------------------------------------------------------
+
+findNamesOfTerm :: Ord a => (Name' n -> Maybe a) -> Term n b -> Set a
+findNamesOfTerm p term = case term of
+    Ret   tl    -> findNamesOfTail p tl
+    Let n tl tm -> setFromMaybe (p (coerceName n))
+       `Set.union` findNamesOfTail p tl
+       `Set.union` findNamesOfTerm p tm
+
+findNamesOfTail :: Ord a => (Name' n -> Maybe a) -> Tail n b -> Set a
+findNamesOfTail p tl = case tl of
+    Concat        xs -> Set.unions (map (setFromMaybe . findNamesOfAtom p) xs)
+    ConcatMap    _ x -> setFromMaybe (findNamesOfAtom p x)
+    GroupByKey     x -> setFromMaybe (findNamesOfAtom p x)
+    FoldValues _ _ x -> setFromMaybe (findNamesOfAtom p x)
+
+findNamesOfAtom :: (Name' n -> Maybe a) -> Atom n b -> Maybe a
+findNamesOfAtom p atom = case atom of
+    Var   n -> p (coerceName n)
+    Const _ -> Nothing
+
+setFromMaybe :: Ord a => Maybe a -> Set a
+setFromMaybe = Set.fromList . maybeToList
+
+------------------------------------------------------------------------
+
+dependencies :: forall a n. Ord n => Set (Name' n) -> Term n a -> Set (Name' n)
 dependencies ns term = case term of
-    Let (Name n) tl tm ->
+    Let n tl tm ->
       let
           ns' = dependencies ns tm
+          n'  = coerceName n
       in
-          if Set.member n ns'
+          if Set.member n' ns'
           then dependenciesOfTail tl `Set.union` ns'
           else ns'
 
-    Run _ tm -> dependencies ns tm
-    Ret _    -> ns
+    Ret _ -> ns
 
-dependenciesOfTail :: Ord n => Tail n a -> Set n
+dependenciesOfTail :: Ord n => Tail n a -> Set (Name' n)
 dependenciesOfTail tl = case tl of
     Concat         xs -> Set.unions (map dependenciesOfAtom xs)
     ConcatMap     _ x -> dependenciesOfAtom x
     GroupByKey      x -> dependenciesOfAtom x
     FoldValues  _ _ x -> dependenciesOfAtom x
-    MapperInput     _ -> Set.empty
-    ReducerInput    _ -> Set.empty
-    MapperOutput  _ x -> dependenciesOfAtom x
-    ReducerOutput _ x -> dependenciesOfAtom x
 
-dependenciesOfAtom :: Ord n => Atom n a -> Set n
+dependenciesOfAtom :: Ord n => Atom n a -> Set (Name' n)
 dependenciesOfAtom atom = case atom of
-    Var (Name n) -> Set.singleton n
-    Const     _  -> Set.empty
+    Var   n -> Set.singleton (coerceName n)
+    Const _ -> Set.empty
 
 ------------------------------------------------------------------------
 
-dependents :: forall a n. Eq n => ([Bool] -> Bool) -> [n] -> Term n a -> [n]
+dependents :: forall a n. Ord n => ([Bool] -> Bool) -> Set (Name' n) -> Term n a -> Set (Name' n)
 dependents combine ns term = case term of
-    Let (Name n) tl tm -> dependents combine (insertConnected n tl) tm
-    Run          _  tm -> dependents combine ns tm
-    Ret          _     -> ns
+    Let n tl tm -> dependents combine (insertConnected (coerceName n) tl) tm
+    Ret   _     -> ns
   where
-    insertConnected :: n -> Tail n b -> [n]
+    insertConnected :: Name' n -> Tail n b -> Set (Name' n)
     insertConnected n tl
-      | isTailDependent combine ns tl = ns ++ [n]
+      | isTailDependent combine ns tl = Set.insert n ns
       | otherwise                     = ns
 
-isTailDependent :: Eq n => ([Bool] -> Bool) -> [n] -> Tail n a -> Bool
+isTailDependent :: Ord n => ([Bool] -> Bool) -> Set (Name' n) -> Tail n a -> Bool
 isTailDependent combine ns tl = case tl of
     Concat         xs -> combine (map (isAtomDependent ns) xs)
     ConcatMap     _ x -> isAtomDependent ns x
     GroupByKey      x -> isAtomDependent ns x
     FoldValues  _ _ x -> isAtomDependent ns x
-    MapperInput     _ -> False
-    ReducerInput    _ -> False
-    MapperOutput  _ x -> isAtomDependent ns x
-    ReducerOutput _ x -> isAtomDependent ns x
 
-isAtomDependent :: Eq n => [n] -> Atom n a -> Bool
+isAtomDependent :: Ord n => Set (Name' n) -> Atom n a -> Bool
 isAtomDependent ns atom = case atom of
-    Var (Name n) -> elem n ns
-    Const     _  -> False
-
-------------------------------------------------------------------------
-
-data RowDesc = RowDesc ReducerName KVFormat
-    deriving (Eq, Ord, Show)
-
-data MSCR = MSCR {
-    mscrMapper   :: [Row ReducerName] -> [Row ReducerName]
-  , mscrReducer  :: [Row ReducerName] -> [Row ReducerName]
-  }
+    Var   n -> Set.member (coerceName n) ns
+    Const _ -> False
 
 ------------------------------------------------------------------------
 
@@ -157,53 +213,9 @@ test = take 10 (decodeTagged schema (encodeTagged schema xs))
     schema = M.fromList [ (67, textFormat  :*: unitFormat)
                         , (22, int32Format :*: bytesFormat) ]
 
-test1 = mscrMapper (interpret example1) (sort (take 10 xs))
-  where
-    xs = cycle [ 0 :*: "" :*: "00000000"
-               , 0 :*: "" :*: "00000001"
-               , 0 :*: "" :*: "00000002"
-               , 0 :*: "" :*: "00000003"
-               , 0 :*: "" :*: "00000004"
-               , 0 :*: "" :*: "00000005"
-               ]
-
-test2 = mscrMapper (interpret example2) (sort (take 10 xs))
-  where
-    xs = cycle [ 0 :*: "" :*: "00000000"
-               , 1 :*: "" :*: "11111111"
-               , 2 :*: "" :*: "22222222"
-               , 3 :*: "" :*: "33333333"
-               ]
-
-test3 = mscrMapper (interpret example3) (sort (take 10 xs))
-  where
-    xs = cycle [ 0 :*: "X" :*: "       1"
-               , 1 :*: "X" :*: "       2"
-               , 2 :*: "X" :*: "       3"
-               , 0 :*: "Y" :*: "      10"
-               , 1 :*: "Y" :*: "      20"
-               , 2 :*: "Y" :*: "      30"
-               , 0 :*: "Z" :*: "     100"
-               , 1 :*: "Z" :*: "     200"
-               , 2 :*: "Z" :*: "     300"
-               ]
-
 ------------------------------------------------------------------------
 
-interpret :: Term String () -> MSCR
-interpret term = MSCR{..}
-  where
-    mscrInputs      = readsOfTerm  0 term
-    mscrOutputs     = writesOfTerm 0 term
-    mscrMapper rows = evalTerm M.empty
-                    . replaceWrites freshNames
-                    . replaceReads rows
-                    . removeGroups 0
-                    $ term
-
-------------------------------------------------------------------------
-
-evalTerm :: (Ord n, Show n) => Map n Dynamic -> Term n (Row ReducerName) -> [Row ReducerName]
+evalTerm :: (Ord n, Show n) => Map n Dynamic -> Term n (Row Tag) -> [Row Tag]
 evalTerm env term = case term of
     Let (Name n) tl tm ->
       let
@@ -212,7 +224,6 @@ evalTerm env term = case term of
           evalTerm env' tm
 
     Ret tl   -> evalTail env tl
-    Run _  _ -> error ("evalTerm: cannot eval: " ++ show term)
 
 evalTail :: forall n a. (Ord n, Show n) => Map n Dynamic -> Tail n a -> [a]
 evalTail env tl = case tl of
@@ -220,10 +231,6 @@ evalTail env tl = case tl of
     ConcatMap   f  xs -> concatMap f (resolve xs)
     GroupByKey     xs -> group (resolve xs)
     FoldValues f x xs -> fold f x (resolve xs)
-    MapperInput   _   -> error ("evalTail: cannot eval: " ++ show tl)
-    ReducerInput  _   -> error ("evalTail: cannot eval: " ++ show tl)
-    MapperOutput  _ _ -> error ("evalTail: cannot eval: " ++ show tl)
-    ReducerOutput _ _ -> error ("evalTail: cannot eval: " ++ show tl)
   where
     resolve :: (Ord n, Show n) => Atom n b -> [b]
     resolve (Var (Name n)) = unsafeDynLookup "evalTail" n env
@@ -244,145 +251,24 @@ evalTail env tl = case tl of
 
 ------------------------------------------------------------------------
 
-removeGroups :: ReducerName -> Term n () -> Term n ()
-removeGroups reducer term = case term of
+removeGroups :: Tag -> Term n () -> Term n ()
+removeGroups tag term = case term of
     Let n (GroupByKey kvs) tm ->
 
       let
-          out = Run   (MapperOutput reducer kvs)
-          inp = Let n (ReducerInput reducer)
+          out = Let (MapperOutput tag) (Concat [kvs])
+          inp = Let n (Concat [Var (ReducerInput tag)])
 
-          reducer' = nextReducer "removeGroups" reducer
+          tag' = nextTag "removeGroups" tag
       in
-          out (inp (removeGroups reducer' tm))
+          out (inp (removeGroups tag' tm))
 
-    Let  n tl tm -> Let  n tl (removeGroups reducer tm)
-    Run    tl tm -> Run    tl (removeGroups reducer tm)
+    Let  n tl tm -> Let  n tl (removeGroups tag tm)
     Ret    tl    -> Ret    tl
 
 ------------------------------------------------------------------------
 
-replaceReads :: [Row ReducerName] -> Term n a -> Term n a
-replaceReads = replaceReadsOfTerm 0
-
-replaceReadsOfTerm :: ReducerName -> [Row ReducerName] -> Term n a -> Term n a
-replaceReadsOfTerm tag rows term = case term of
-    Let n (MapperInput path :: Tail n b) tm ->
-
-      let
-          xs :: [b]
-          xs = map (decodeRow . snd')
-             $ filter (hasTag tag) rows
-
-          tag' = nextReducer "replaceReadsOfTerm" tag
-      in
-          Let n (Concat [Const xs]) (replaceReadsOfTerm tag' rows tm)
-
-    Let n  tl tm -> Let n  tl (replaceReadsOfTerm tag rows tm)
-    Run    tl tm -> Run    tl (replaceReadsOfTerm tag rows tm)
-    Ret    tl    -> Ret    tl
-
-------------------------------------------------------------------------
-
-nextReducer :: String -> ReducerName -> ReducerName
-nextReducer msg name | name /= maxBound = succ name
-                     | otherwise        = error msg'
-  where
-    msg' = msg ++ ": exceeded maximum number of reducers <" ++ show name ++ ">"
-
-------------------------------------------------------------------------
-
-replaceWrites :: [n] -> Term n () -> Term n (Row ReducerName)
-replaceWrites = replaceWritesOfTerm 0 []
-
-replaceWritesOfTerm :: forall n. ReducerName
-                    -> [Name n (Row ReducerName)]
-                    -> [n]
-                    -> Term n ()
-                    -> Term n (Row ReducerName)
-replaceWritesOfTerm tag outs fresh term = case term of
-
-    Run   tl tm -> case replaceWritesOfTail tag tl of
-      Nothing  -> Run tl (replaceWritesOfTerm tag outs fresh tm)
-      Just tl' -> replaceWithLet tl' tm
-
-    Let n tl tm -> case replaceWritesOfTail tag tl of
-      Nothing  -> Let n tl (replaceWritesOfTerm tag outs fresh tm)
-      Just tl' -> replaceWithLet tl' tm
-
-    Ret   tl    -> case replaceWritesOfTail tag tl of
-      Nothing  -> Ret (Concat (map Var outs))
-      Just tl' -> replaceWithLet tl' (Ret (Concat []))
-
-  where
-    replaceWithLet :: Typeable n
-                   => Tail n (Row ReducerName)
-                   -> Term n ()
-                   -> Term n (Row ReducerName)
-    replaceWithLet tl' tm =
-      let
-          (n:fresh') = fresh
-          name       = Name n
-
-          tag'  = nextReducer "replaceWritesOfterm" tag
-          outs' = name : outs
-      in
-          Let name tl' (replaceWritesOfTerm tag' outs' fresh' tm)
-
-
-replaceWritesOfTail :: ReducerName
-                    -> Tail n a
-                    -> Maybe (Tail n (Row ReducerName))
-replaceWritesOfTail tag tl = case tl of
-    ReducerOutput path (xs :: Atom n b) -> Just (ConcatMap go xs)
-    _                               -> Nothing
-  where
-    go :: KV b => b -> [Row ReducerName]
-    go x = [tag :*: encodeRow x]
-
-------------------------------------------------------------------------
-
-readsOfTerm :: ReducerName -> Term n a -> [FilePath]
-readsOfTerm tag term = case term of
-    Let (Name n) (MapperInput path :: Tail n b) tm ->
-
-      let
-          tag' = nextReducer "readsOfTerm" tag
-          desc = RowDesc tag (kvFormat (undefined :: b))
-      in
-          path : readsOfTerm tag' tm
-
-    Let _  _ tm -> readsOfTerm tag tm
-    Run    _ tm -> readsOfTerm tag tm
-    Ret    _    -> []
-
-------------------------------------------------------------------------
-
-writesOfTerm :: ReducerName -> Term n a -> [FilePath]
-writesOfTerm tag term = case term of
-    Run    tl tm -> go (writesOfTail tag tl) (\tg -> writesOfTerm tg tm)
-    Let _  tl tm -> go (writesOfTail tag tl) (\tg -> writesOfTerm tg tm)
-    Ret    tl    -> go (writesOfTail tag tl) (const [])
-  where
-    go (Just file) f = [file] ++ f tag'
-    go Nothing     f = f tag
-
-    tag' = nextReducer "writesOfTerm" tag
-
-writesOfTail :: ReducerName -> Tail n a -> Maybe FilePath
-writesOfTail tag tl = case tl of
-    ReducerOutput path (xs :: Atom n b) ->
-
-      let
-          desc = RowDesc tag (kvFormat (undefined :: b))
-      in
-          Just path
-
-    _ -> Nothing
-
-------------------------------------------------------------------------
-
-decodeTagged :: Map ReducerName KVFormat -> L.ByteString -> [Row ReducerName]
+decodeTagged :: Map Tag KVFormat -> L.ByteString -> [Row Tag]
 decodeTagged schema bs =
     -- TODO this is unlikely to have good performance
     case runGetOrFail (getTagged schema) bs of
@@ -390,10 +276,10 @@ decodeTagged schema bs =
         Right (bs', o, x) | L.null bs' -> [x]
                           | otherwise  -> x : decodeTagged schema bs'
 
-encodeTagged :: Map ReducerName KVFormat -> [Row ReducerName] -> L.ByteString
+encodeTagged :: Map Tag KVFormat -> [Row Tag] -> L.ByteString
 encodeTagged schema = runPut . mapM_ (putTagged schema)
 
-getTagged :: Map ReducerName KVFormat -> Get (Row ReducerName)
+getTagged :: Map Tag KVFormat -> Get (Row Tag)
 getTagged schema = do
     tag <- getWord8
     case M.lookup tag schema of
@@ -401,7 +287,7 @@ getTagged schema = do
       Just (kFmt :*: vFmt) -> pure tag <&> getLayout (fmtLayout kFmt)
                                        <&> getLayout (fmtLayout vFmt)
 
-putTagged :: Map ReducerName KVFormat -> Row ReducerName -> Put
+putTagged :: Map Tag KVFormat -> Row Tag -> Put
 putTagged schema (tag :*: k :*: v) =
     case M.lookup tag schema of
       Nothing              -> fail ("putTagged: invalid tag <" ++ show tag ++ ">")

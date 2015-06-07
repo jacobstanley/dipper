@@ -180,11 +180,28 @@ snd' (_ :*: x) = x
 
 ------------------------------------------------------------------------
 
-newtype Name n a = Name n
+type Tag = Word8
+
+data Name n a =
+      Name          n
+    | MapperInput   FilePath
+    | MapperOutput  Tag
+    | ReducerInput  Tag
+    | ReducerOutput FilePath
     deriving (Eq, Ord, Show, Typeable)
+
+type Name' n = Name n ()
 
 instance IsString (Name String a) where
     fromString = Name
+
+coerceName :: Name n a -> Name n b
+coerceName name = case name of
+    Name          x -> Name          x
+    MapperInput   x -> MapperInput   x
+    MapperOutput  x -> MapperOutput  x
+    ReducerInput  x -> ReducerInput  x
+    ReducerOutput x -> ReducerOutput x
 
 ------------------------------------------------------------------------
 
@@ -228,28 +245,6 @@ data Tail n a where
                -> Atom n (k :*: [v])
                -> Tail n (k :*:  v )
 
-    -- | Input to a mapper - read from a file.
-    MapperInput :: (Typeable n, Typeable a, KV a)
-                => FilePath
-                -> Tail n a
-
-    -- | Input to a reducer - read from a tag.
-    ReducerInput :: (Typeable n, Typeable a, KV a)
-                 => Word8
-                 -> Tail n a
-
-    -- | Output from a mapper - write to a tag.
-    MapperOutput :: (Typeable n, Typeable a, KV a)
-                 => Word8
-                 -> Atom n a
-                 -> Tail n ()
-
-    -- | Output from a reducer - write to a file
-    ReducerOutput :: (Typeable n, Typeable a, KV a)
-                  => FilePath
-                  -> Atom n a
-                  -> Tail n ()
-
   deriving (Typeable)
 
 
@@ -259,12 +254,6 @@ data Term n a where
     Let :: (Typeable n, Typeable a)
         => Name n a
         -> Tail n a
-        -> Term n b
-        -> Term n b
-
-    -- | Let binding of ().
-    Run :: (Typeable n)
-        => Tail n ()
         -> Term n b
         -> Term n b
 
@@ -296,16 +285,6 @@ instance Show n => Show (Tail n a) where
                                                     . showsPrec (app+1) (typeOf x)
                                                     . showString " "
                                                     . showsPrec (app+1) xs
-                                                    . showsPrec (app+1) xs
-
-      MapperInput   path    -> showString "MapperInput "   . showsPrec (app+1) path
-      ReducerInput  tag     -> showString "ReducerInput "  . showsPrec (app+1) tag
-      MapperOutput  tag  xs -> showString "MapperOutput "  . showsPrec (app+1) tag
-                                                           . showString " "
-                                                           . showsPrec (app+1) xs
-      ReducerOutput path xs -> showString "ReducerOutput " . showsPrec (app+1) path
-                                                           . showString " "
-                                                           . showsPrec (app+1) xs
     where
       app = 10
 
@@ -314,9 +293,6 @@ instance Show n => Show (Term n a) where
       Let n tl tm -> showString "Let "    . showsPrec (app+1) n
                                           . showString " "
                                           . showsPrec (app+1) tl
-                                          . showString "\n"
-                                          . showsPrec (app+1) tm
-      Run   tl tm -> showString "Run "    . showsPrec (app+1) tl
                                           . showString "\n"
                                           . showsPrec (app+1) tm
       Ret   tl    -> showString "Ret "    . showsPrec (app+1) tl
