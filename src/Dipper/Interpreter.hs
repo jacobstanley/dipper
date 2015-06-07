@@ -31,7 +31,16 @@ import           Dipper.Types
 
 ------------------------------------------------------------------------
 
-data RowDesc = RowDesc Tag RowFormat RowType
+type MapperName  = FilePath
+type ReducerName = Word8
+
+data Step i o = Step i [o] (Term String [Row o])
+type Mapper   = Step MapperName ReducerName
+type Reducer  = Step ReducerName MapperName
+
+------------------------------------------------------------------------
+
+data RowDesc = RowDesc ReducerName KVFormat KVType
     deriving (Eq, Ord, Show)
 
 data File = File FilePath RowDesc
@@ -41,8 +50,8 @@ data MSCR = MSCR {
     mscrInputs   :: [File]
   , mscrShuffles :: [RowDesc]
   , mscrOutputs  :: [File]
-  , mscrMapper   :: [TaggedRow] -> [TaggedRow]
-  , mscrReducer  :: [TaggedRow] -> [TaggedRow]
+  , mscrMapper   :: [Row ReducerName] -> [Row ReducerName]
+  , mscrReducer  :: [Row ReducerName] -> [Row ReducerName]
   }
 
 instance Show MSCR where
@@ -51,20 +60,6 @@ instance Show MSCR where
                            . showsPrec 11 mscrInputs
                            . showString " "
                            . showsPrec 11 mscrOutputs
-
-------------------------------------------------------------------------
-
-{-
-xs :: [Maybe a]
-ys :: [Maybe a]
-merge [xs, ys] :: [Maybe a]
-
-data Consumer a m b = Consumer (a -> m b)
-
-xs :: Consumer () IO (Maybe a)
-ys :: Consumer () IO (Maybe a)
-merge xs ys :: Consumer () IO (Maybe a)
--}
 
 ------------------------------------------------------------------------
 
@@ -123,7 +118,7 @@ interpret term = MSCR{..}
 
 ------------------------------------------------------------------------
 
-evalTerm :: (Ord n, Show n) => Map n Dynamic -> Term n TaggedRow -> [TaggedRow]
+evalTerm :: (Ord n, Show n) => Map n Dynamic -> Term n (Row ReducerName) -> [Row ReducerName]
 evalTerm env term = case term of
     Let (Name n) tl tm ->
       let
@@ -178,10 +173,10 @@ removeGroups term = case term of
 
 ------------------------------------------------------------------------
 
-replaceReads :: [TaggedRow] -> Term n a -> Term n a
+replaceReads :: [Row ReducerName] -> Term n a -> Term n a
 replaceReads = replaceReadsOfTerm 0
 
-replaceReadsOfTerm :: Tag -> [TaggedRow] -> Term n a -> Term n a
+replaceReadsOfTerm :: ReducerName -> [Row ReducerName] -> Term n a -> Term n a
 replaceReadsOfTerm tag rows term = case term of
     Let n (ReadFile path :: Tail n b) tm ->
 
@@ -200,7 +195,7 @@ replaceReadsOfTerm tag rows term = case term of
 
 ------------------------------------------------------------------------
 
-nextTag :: String -> Tag -> Tag
+nextTag :: String -> ReducerName -> ReducerName
 nextTag msg tag | tag /= maxBound = tag + 1
                 | otherwise       = error msg'
   where
@@ -208,10 +203,14 @@ nextTag msg tag | tag /= maxBound = tag + 1
 
 ------------------------------------------------------------------------
 
-replaceWrites :: [n] -> Term n () -> Term n TaggedRow
+replaceWrites :: [n] -> Term n () -> Term n (Row ReducerName)
 replaceWrites = replaceWritesOfTerm 0 []
 
-replaceWritesOfTerm :: forall n. Tag -> [Name n TaggedRow] -> [n] -> Term n () -> Term n TaggedRow
+replaceWritesOfTerm :: forall n. ReducerName
+                    -> [Name n (Row ReducerName)]
+                    -> [n]
+                    -> Term n ()
+                    -> Term n (Row ReducerName)
 replaceWritesOfTerm tag outs fresh term = case term of
 
     Run    tl tm -> case replaceWritesOfTail tag tl of
@@ -227,7 +226,10 @@ replaceWritesOfTerm tag outs fresh term = case term of
       Just tl' -> replaceWithLet tl' (Return (Concat []))
 
   where
-    replaceWithLet :: Typeable n => Tail n TaggedRow -> Term n () -> Term n TaggedRow
+    replaceWithLet :: Typeable n
+                   => Tail n (Row ReducerName)
+                   -> Term n ()
+                   -> Term n (Row ReducerName)
     replaceWithLet tl' tm =
       let
           (n:fresh') = fresh
@@ -239,24 +241,26 @@ replaceWritesOfTerm tag outs fresh term = case term of
           Let name tl' (replaceWritesOfTerm tag' outs' fresh' tm)
 
 
-replaceWritesOfTail :: Tag -> Tail n a -> Maybe (Tail n TaggedRow)
+replaceWritesOfTail :: ReducerName
+                    -> Tail n a
+                    -> Maybe (Tail n (Row ReducerName))
 replaceWritesOfTail tag tl = case tl of
     WriteFile path (xs :: Atom n b) -> Just (ConcatMap go xs)
     _                               -> Nothing
   where
-    go :: Row b => b -> [TaggedRow]
+    go :: KV b => b -> [Row ReducerName]
     go x = [tag :*: encodeRow x]
 
 ------------------------------------------------------------------------
 
-readsOfTerm :: Tag -> Term n a -> [File]
+readsOfTerm :: ReducerName -> Term n a -> [File]
 readsOfTerm tag term = case term of
     Let (Name n) (ReadFile path :: Tail n b) tm ->
 
       let
           tag' = nextTag "readsOfTerm" tag
-          desc = RowDesc tag (rowFormat (undefined :: b))
-                             (rowType   (undefined :: b))
+          desc = RowDesc tag (kvFormat (undefined :: b))
+                             (kvType   (undefined :: b))
       in
           (File path desc) : readsOfTerm tag' tm
 
@@ -266,7 +270,7 @@ readsOfTerm tag term = case term of
 
 ------------------------------------------------------------------------
 
-writesOfTerm :: Tag -> Term n a -> [File]
+writesOfTerm :: ReducerName -> Term n a -> [File]
 writesOfTerm tag term = case term of
     Run    tl tm -> go (writesOfTail tag tl) (\tg -> writesOfTerm tg tm)
     Let _  tl tm -> go (writesOfTail tag tl) (\tg -> writesOfTerm tg tm)
@@ -277,13 +281,13 @@ writesOfTerm tag term = case term of
 
     tag' = nextTag "writesOfTerm" tag
 
-writesOfTail :: Tag -> Tail n a -> Maybe File
+writesOfTail :: ReducerName -> Tail n a -> Maybe File
 writesOfTail tag tl = case tl of
     WriteFile path (xs :: Atom n b) ->
 
       let
-          desc = RowDesc tag (rowFormat (undefined :: b))
-                             (rowType   (undefined :: b))
+          desc = RowDesc tag (kvFormat (undefined :: b))
+                             (kvType   (undefined :: b))
       in
           Just (File path desc)
 
@@ -291,7 +295,7 @@ writesOfTail tag tl = case tl of
 
 ------------------------------------------------------------------------
 
-decodeTagged :: Map Tag RowFormat -> L.ByteString -> [TaggedRow]
+decodeTagged :: Map ReducerName KVFormat -> L.ByteString -> [Row ReducerName]
 decodeTagged schema bs =
     -- TODO this is unlikely to have good performance
     case runGetOrFail (getTagged schema) bs of
@@ -299,17 +303,17 @@ decodeTagged schema bs =
         Right (bs', o, x) | L.null bs' -> [x]
                           | otherwise  -> x : decodeTagged schema bs'
 
-encodeTagged :: Map Tag RowFormat -> [TaggedRow] -> L.ByteString
+encodeTagged :: Map ReducerName KVFormat -> [Row ReducerName] -> L.ByteString
 encodeTagged schema = runPut . mapM_ (putTagged schema)
 
-getTagged :: Map Tag RowFormat -> Get TaggedRow
+getTagged :: Map ReducerName KVFormat -> Get (Row ReducerName)
 getTagged schema = do
     tag <- getWord8
     case M.lookup tag schema of
       Nothing              -> fail ("getTagged: invalid tag <" ++ show tag ++ ">")
       Just (kFmt :*: vFmt) -> pure tag <&> getFormatted kFmt <&> getFormatted vFmt
 
-putTagged :: Map Tag RowFormat -> TaggedRow -> Put
+putTagged :: Map ReducerName KVFormat -> Row ReducerName -> Put
 putTagged schema (tag :*: k :*: v) =
     case M.lookup tag schema of
       Nothing              -> fail ("putTagged: invalid tag <" ++ show tag ++ ">")

@@ -17,13 +17,10 @@ import           Data.String (IsString(..))
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import           Data.Typeable (Typeable, typeOf)
-import           Data.Word (Word8)
 
 import           Dipper.Binary
 
 ------------------------------------------------------------------------
-
-type Tag = Word8
 
 data ByteFormat =
       VarVInt      -- ^ Variable length, prefixed by Hadoop-style vint
@@ -31,13 +28,13 @@ data ByteFormat =
     | Fixed Int    -- ^ Fixed length, always 'n' bytes
   deriving (Eq, Ord, Show)
 
-type RowFormat = ByteFormat :*: ByteFormat
+type KVFormat = ByteFormat :*: ByteFormat
 
-type TaggedRow = Tag :*: S.ByteString :*: S.ByteString
+type Row a = a :*: S.ByteString :*: S.ByteString
 
 ------------------------------------------------------------------------
 
-hasTag :: Tag -> TaggedRow -> Bool
+hasTag :: Eq a => a -> Row a -> Bool
 hasTag tag (tag' :*: _) = tag == tag'
 
 getFormatted :: ByteFormat -> Get S.ByteString
@@ -59,27 +56,27 @@ putFormatted fmt bs = case fmt of
 
 ------------------------------------------------------------------------
 
-class Row a where
-    rowFormat :: a -> RowFormat
-    rowType   :: a -> RowType
+class KV a where
+    kvFormat  :: a -> KVFormat
+    kvType    :: a -> KVType
     encodeRow :: a -> S.ByteString :*: S.ByteString
     decodeRow :: S.ByteString :*: S.ByteString -> a
 
-instance {-# OVERLAPPABLE #-} HadoopWritable a => Row a where
-    rowFormat  _        = byteFormat () :*: byteFormat (undefined :: a)
-    rowType    _        = hadoopType () :*: hadoopType (undefined :: a)
+instance {-# OVERLAPPABLE #-} HadoopWritable a => KV a where
+    kvFormat  _        = byteFormat () :*: byteFormat (undefined :: a)
+    kvType    _        = hadoopType () :*: hadoopType (undefined :: a)
     encodeRow        x  = encode     () :*: encode x
     decodeRow (_ :*: x) = decode x
 
-instance {-# OVERLAPPING #-} (HadoopWritable k, HadoopWritable v) => Row (k :*: v) where
-    rowFormat  _        = byteFormat (undefined :: v) :*: byteFormat (undefined :: v)
-    rowType    _        = hadoopType (undefined :: v) :*: hadoopType (undefined :: v)
+instance {-# OVERLAPPING #-} (HadoopWritable k, HadoopWritable v) => KV (k :*: v) where
+    kvFormat  _        = byteFormat (undefined :: v) :*: byteFormat (undefined :: v)
+    kvType    _        = hadoopType (undefined :: v) :*: hadoopType (undefined :: v)
     encodeRow (x :*: y) = encode x :*: encode y
     decodeRow (x :*: y) = decode x :*: decode y
 
-instance {-# OVERLAPPING #-} (HadoopWritable k, HadoopWritable v) => Row (k :*: [v]) where
-    rowFormat  _         = byteFormat (undefined :: v) :*: byteFormat (undefined :: [v])
-    rowType    _         = hadoopType (undefined :: v) :*: hadoopType (undefined :: [v])
+instance {-# OVERLAPPING #-} (HadoopWritable k, HadoopWritable v) => KV (k :*: [v]) where
+    kvFormat  _         = byteFormat (undefined :: v) :*: byteFormat (undefined :: [v])
+    kvType    _         = hadoopType (undefined :: v) :*: hadoopType (undefined :: [v])
     encodeRow (x :*: ys) = encode x :*: encode ys
     decodeRow (x :*: ys) = decode x :*: decode ys
 
@@ -87,7 +84,7 @@ instance {-# OVERLAPPING #-} (HadoopWritable k, HadoopWritable v) => Row (k :*: 
 
 type HadoopType = T.Text
 
-type RowType = HadoopType :*: HadoopType
+type KVType = HadoopType :*: HadoopType
 
 -- | Implementations should match `org.apache.hadoop.io.HadoopWritable` where
 -- possible.
@@ -222,12 +219,12 @@ data Tail n a where
                -> Tail n (k :*:  v )
 
     -- | Read from a file.
-    ReadFile   :: (Typeable n, Typeable a, Row a)
+    ReadFile   :: (Typeable n, Typeable a, KV a)
                => FilePath
                -> Tail n a
 
     -- | Write to a file
-    WriteFile  :: (Typeable n, Typeable a, Row a)
+    WriteFile  :: (Typeable n, Typeable a, KV a)
                => FilePath
                -> Atom n a
                -> Tail n ()
