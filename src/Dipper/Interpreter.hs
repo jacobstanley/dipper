@@ -61,19 +61,18 @@ mkPipeline = undefined
 
 evalTerm :: (Ord n, Show n) => Map n Dynamic -> Term n (Row Tag) -> [Row Tag]
 evalTerm env term = case term of
-    Let (Name n) tl tm ->
+    Write _ _ _           -> error "evalTerm: Write"
+    Return (Var (Name n)) -> unsafeDynLookup "evalTerm" n env
+    Return (Const xs)     -> xs
+    Let (Name n) tl tm    ->
       let
           env' = M.insert n (toDyn (evalTail env tl)) env
       in
           evalTerm env' tm
 
-    Return (Var (Name n)) -> unsafeDynLookup "evalTerm" n env
-    Return (Const xs)     -> xs
-
 evalTail :: forall n a. (Ord n, Show n) => Map n Dynamic -> Tail n a -> [a]
 evalTail env tl = case tl of
     Read  _           -> error "evalTail: Read"
-    Write _ _         -> error "evalTail: Write"
     Concat        xss -> concatMap resolve xss
     ConcatMap   f  xs -> concatMap f (resolve xs)
     GroupByKey     xs -> group (resolve xs)

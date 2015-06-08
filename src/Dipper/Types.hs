@@ -214,16 +214,10 @@ data Atom n a where
 
 data Tail n a where
 
-    -- | Read from a source.
+    -- | Read from a input.
     Read :: (Typeable n, Typeable a, KV a)
          => Input a
          -> Tail n a
-
-    -- | Write to a sink.
-    Write :: (Typeable n, Typeable a, KV a)
-          => Output a
-          -> Atom n a
-          -> Tail n ()
 
     -- | Flatten from the FlumeJava paper.
     Concat :: (Typeable n, Typeable a)
@@ -253,17 +247,24 @@ data Tail n a where
 
 data Term n a where
 
+    -- | Result of term.
+    Return :: (Typeable n)
+           => Atom n a
+           -> Term n a
+
+    -- | Write to an output.
+    Write :: (Typeable n, Typeable a, KV a)
+          => Output a
+          -> Atom n a
+          -> Term n b
+          -> Term n b
+
     -- | Let binding.
     Let :: (Typeable n, Typeable a)
         => Name n a
         -> Tail n a
         -> Term n b
         -> Term n b
-
-    -- | Result of term.
-    Return :: (Typeable n)
-           => Atom n a
-           -> Term n a
 
   deriving (Typeable)
 
@@ -277,9 +278,6 @@ instance Show n => Show (Atom n a) where
 instance Show n => Show (Tail n a) where
   showsPrec p tl = showParen' p $ case tl of
       Read       inp    -> showString "Read "       . showForeign inp
-      Write      out xs -> showString "Write "      . showForeign out
-                                                    . showString " "
-                                                    . showForeign xs
       Concat        xss -> showString "Concat "     . showForeign xss
       ConcatMap   f  xs -> showString "ConcatMap "  . showForeign (typeOf f)
                                                     . showString " "
@@ -293,12 +291,17 @@ instance Show n => Show (Tail n a) where
 
 instance Show n => Show (Term n a) where
   showsPrec p x = showParen' p $ case x of
-      Let n tl tm -> showString "Let "    . showForeign n
-                                          . showString " "
-                                          . showForeign tl
-                                          . showString "\n"
-                                          . showForeign tm
-      Return a    -> showString "Return " . showForeign a
+      Return a     -> showString "Return " . showForeign a
+      Let n tl tm  -> showString "Let "    . showForeign n
+                                           . showString " "
+                                           . showForeign tl
+                                           . showString "\n"
+                                           . showForeign tm
+      Write o a tm -> showString "Write "  . showForeign o
+                                           . showString " "
+                                           . showForeign a
+                                           . showString "\n"
+                                           . showForeign tm
 
 ------------------------------------------------------------------------
 

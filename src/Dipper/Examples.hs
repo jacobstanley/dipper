@@ -17,8 +17,8 @@ example1 =
     Let x1 (ConcatMap (\x -> [x + 1]) (Var x0)) $
     Let x2 (ConcatMap (\x -> [x * 2]) (Var x0)) $
     Let x3 (Concat [Var x1, Var x2]) $
-    Let x4 (Write output (Var x3)) $
-    Return (Var x4)
+    Write output (Var x3) $
+    Return (Const [])
   where
     input  = MapperInput   "input.csv"  :: Input Int
     output = ReducerOutput "output.csv" :: Output Int
@@ -27,37 +27,36 @@ example1 =
     x1 = "x1"
     x2 = "x2"
     x3 = "x3"
-    x4 = "x4"
 
 ------------------------------------------------------------------------
 
 example2 :: Term String ()
 example2 =
-    Let i1      (Read input1) $
-    Let a       (ConcatMap add1 (Var i1)) $
-    Let write1  (ConcatMap add1 (Var a)) $
-    Let o1      (Write output1 (Var write1)) $
-    Let jtag1   (ConcatMap (tag 1) (Var a)) $
-    Let i2      (Read input2) $
-    Let i3      (Read input3) $
-    Let b       (ConcatMap add1 (Var i2)) $
-    Let c       (ConcatMap add1 (Var i3)) $
-    Let fltn    (Concat [Var b, Var c]) $
-    Let d       (ConcatMap add1 (Var fltn)) $
-    Let jtag2   (ConcatMap (tag 2) (Var d)) $
-    Let i4      (Read input4) $
-    Let gmap    (ConcatMap kv_add1 (Var i4)) $
-    Let ggbk    (GroupByKey (Var gmap)) $
-    Let gcv     (FoldValues (+) 0 (Var ggbk)) $
-    Let e       (ConcatMap untag (Var gcv)) $
-    Let jtag3   (ConcatMap (tag 3) (Var e)) $
-    Let jfltn   (Concat [Var jtag1, Var jtag2, Var jtag3]) $
-    Let jgbk    (GroupByKey (Var jfltn)) $
-    Let juntag  (ConcatMap untag (Var jgbk)) $
-    Let f       (ConcatMap id (Var juntag)) $
-    Let write2  (Concat [Var f]) $
-    Let o2      (Write output2 (Var write2)) $
-    Return      (Var o2)
+    Let i1     (Read input1) $
+    Let a      (ConcatMap add1 (Var i1)) $
+    Let write1 (ConcatMap add1 (Var a)) $
+    Write output1 (Var write1) $
+    Let jtag1  (ConcatMap (tag 1) (Var a)) $
+    Let i2     (Read input2) $
+    Let i3     (Read input3) $
+    Let b      (ConcatMap add1 (Var i2)) $
+    Let c      (ConcatMap add1 (Var i3)) $
+    Let fltn   (Concat [Var b, Var c]) $
+    Let d      (ConcatMap add1 (Var fltn)) $
+    Let jtag2  (ConcatMap (tag 2) (Var d)) $
+    Let i4     (Read input4) $
+    Let gmap   (ConcatMap kv_add1 (Var i4)) $
+    Let ggbk   (GroupByKey (Var gmap)) $
+    Let gcv    (FoldValues (+) 0 (Var ggbk)) $
+    Let e      (ConcatMap untag (Var gcv)) $
+    Let jtag3  (ConcatMap (tag 3) (Var e)) $
+    Let jfltn  (Concat [Var jtag1, Var jtag2, Var jtag3]) $
+    Let jgbk   (GroupByKey (Var jfltn)) $
+    Let juntag (ConcatMap untag (Var jgbk)) $
+    Let f      (ConcatMap id (Var juntag)) $
+    Let write2 (Concat [Var f]) $
+    Write output2 (Var write2) $
+    Return (Const [])
   where
     add1 :: Int -> [Int]
     add1 x = [x+1]
@@ -84,8 +83,6 @@ example2 =
     i2 = "input2"
     i3 = "input3"
     i4 = "input4"
-    o1 = "_1"
-    o2 = "_2"
 
     a  = "A"
     b  = "B"
@@ -122,9 +119,9 @@ example3 =
     Let text1   (ConcatMap (\(k :*: v) -> [k :*: T.pack (show v)]) (Var concat1)) $
     Let gbk1    (GroupByKey (Var text1)) $
     Let gbk2    (GroupByKey (Var concat2)) $
-    Let o1      (Write output1 (Var gbk1)) $
-    Let o2      (Write output2 (Var gbk2)) $
-    Return      (Var o2)
+    Write output1 (Var gbk1) $
+    Write output2 (Var gbk2) $
+    Return (Const [])
   where
     input1  = MapperInput "in-1.csv" :: Input (Text :*: Int)
     input2  = MapperInput "in-2.csv"
@@ -135,8 +132,6 @@ example3 =
     i1      = "input1"
     i2      = "input2"
     i3      = "input3"
-    o1      = "_1"
-    o2      = "_2"
     text1   = "text1"
     concat1 = "concat1"
     concat2 = "concat2"
