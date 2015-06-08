@@ -6,6 +6,10 @@ module Dipper.Sink where
 
 data Sink a = Sink (a -> IO ())
 
+-- | Push a value in to a sink.
+push :: Sink a -> a -> IO ()
+push (Sink io) x = io x
+
 -- | The dual of map (aka contramap).
 unmap :: (b -> a) -> Sink a -> Sink b
 unmap f (Sink io) = Sink (io . f)

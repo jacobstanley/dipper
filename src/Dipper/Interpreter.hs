@@ -75,14 +75,19 @@ instance Monoid Pipeline where
 
 ------------------------------------------------------------------------
 
-mkPipeline :: (Show n, Ord n) => Term n a -> Pipeline
+mkPipeline :: (Ord n, Show n) => Term n () -> Pipeline
 mkPipeline term = foldMap mkStep
                 . M.toList
                 . M.mapMaybe rootInput
                 . inputsOfTerm M.empty
                 $ term'
   where
-    term' = rename term
+    term' = rename
+          . fixR2M tempPaths
+          . fixM2R
+          . removeGroups 0
+          . rename
+          $ term
 
     mkStep (n, Input' i kvt) = case i of
         MapperInput path -> mkMapper (Formatted path kvt)
@@ -122,6 +127,8 @@ mkMapper inp@(Formatted path _) outs term =
 mkReducer :: Formatted Tag -> [Formatted FilePath] -> Term Int () -> Pipeline
 mkReducer inp@(Formatted tag _) outs term =
     Pipeline M.empty (M.singleton tag (mkStep inp outs term))
+  where
+    exec = evalReducerTerm' term
 
 outputPaths :: String -> [Output'] -> [Formatted FilePath]
 outputPaths msg = map go
@@ -134,20 +141,6 @@ outputTags msg = map go
   where
     go (Output' (MapperOutput tag) kv) = Formatted tag kv
     go x = error (msg ++ ": inconsistent output: " ++ show x)
-
-------------------------------------------------------------------------
-
-replaceReads :: forall a n. (Ord n, Show n) => Term n a -> [Row ()] -> Term n a
-replaceReads term rows = case term of
-    Let (Name n :: Name n b) (Read _) tm ->
-
-      let
-           rows' :: Atom n b
-           rows' = Const (map (decodeRow . dropTag) rows)
-      in
-           substTerm (M.singleton n (toDyn rows')) tm
-
-    _  -> error "mkStep: initial term must be a read"
 
 ------------------------------------------------------------------------
 
@@ -165,7 +158,7 @@ dynDup _ x y = toDyn (dup (unsafeFromDyn "dynDup" x :: Sink a)
 
 evalTail :: Ord n => DynSink -> Tail n a -> Map n (DynSink, DynDup)
 evalTail sink tl = case tl of
-    Read _        -> M.empty -- error "evalTail: found Read"
+    Read _        -> M.empty
     GroupByKey _  -> error "evalTail: found GroupByKey"
     Concat (xs :: [Atom n a]) ->
       let
@@ -193,6 +186,8 @@ evalTail sink tl = case tl of
   where
     withElem s v = M.fromSet (const v) s
 
+------------------------------------------------------------------------
+
 evalMapperTerm :: (Show n, Ord n) => Sink (Row Tag) -> Term n a -> Map n (DynSink, DynDup)
 evalMapperTerm sink term = case term of
     Return _ -> M.empty
@@ -206,6 +201,8 @@ evalMapperTerm sink term = case term of
           sinks = evalMapperTerm sink tm
       in
           M.insert n (toDyn sink', dynDup sink') sinks
+
+    Write _ _ _ -> error "evalMapperTerm: found reducer output"
 
     Let (Name n) tl tm ->
       let
@@ -232,41 +229,46 @@ evalMapperTerm' term sink = case term of
 
 ------------------------------------------------------------------------
 
-evalTailOld :: forall n a. (Ord n, Show n) => Map n Dynamic -> Tail n a -> [a]
-evalTailOld env tl = case tl of
-    Read  _           -> error "evalTailOld: Read"
-    Concat        xss -> concatMap resolve xss
-    ConcatMap   f  xs -> concatMap f (resolve xs)
-    GroupByKey     xs -> group (resolve xs)
-    FoldValues f x xs -> fold f x (resolve xs)
-  where
-    resolve :: (Ord n, Show n) => Atom n b -> [b]
-    resolve (Var (Name n)) = unsafeDynLookup "evalTailOld" n env
-    resolve (Const xs)     = xs
+-- TODO evalReducerTerm is virtually the same as evalMapperTerm
 
-    fold :: (v -> v -> v) -> v -> [k :*: [v]] -> [k :*: v]
-    fold f x xs = map (\(k :*: vs) -> k :*: foldl' f x vs) xs
+evalReducerTerm :: (Show n, Ord n) => Sink (Row FilePath) -> Term n a -> Map n (DynSink, DynDup)
+evalReducerTerm sink term = case term of
+    Return _ -> M.empty
 
-    group :: Eq k => [k :*: v] -> [k :*: [v]]
-    group = map fixGroup . groupBy keyEq
-
-    keyEq :: Eq k => k :*: v -> k :*: v -> Bool
-    keyEq (x :*: _) (y :*: _) = x == y
-
-    fixGroup :: [k :*: v] -> k :*: [v]
-    fixGroup []                = error "evalTailOld: groupBy yielded empty list: impossible"
-    fixGroup ((k :*: v) : kvs) = k :*: (v : map snd' kvs)
-
-evalTermOld :: (Ord n, Show n) => Map n Dynamic -> Term n (Row a) -> [Row a]
-evalTermOld env term = case term of
-    Write _ _ _           -> error "evalTermOld: Write"
-    Return (Var (Name n)) -> unsafeDynLookup "evalTermOld" n env
-    Return (Const xs)     -> xs
-    Let (Name n) tl tm    ->
+    Write (ReducerOutput path :: Output a) (Var (Name n)) tm ->
       let
-          env' = M.insert n (toDyn (evalTailOld env tl)) env
+          enc :: a -> Row FilePath
+          enc x = path :*: encodeRow x
+
+          sink' = unmap enc sink
+          sinks = evalReducerTerm sink tm
       in
-          evalTermOld env' tm
+          M.insert n (toDyn sink', dynDup sink') sinks
+
+    Write _ _ _ -> error "evalReducerTerm: found reducer output"
+
+    Let (Name n) tl tm ->
+      let
+          tm'sinks    = evalReducerTerm sink tm
+          (n'sink, _) = unsafeLookup "evalReducerTerm" n tm'sinks
+          tl'sinks    = evalTail n'sink tl
+      in
+          M.unionWith (\(s, d) (s', _) -> (d s s', d)) tm'sinks tl'sinks
+
+evalReducerTerm' :: (Show n, Ord n) => Term n a -> Sink (Row FilePath) -> Sink (Row ())
+evalReducerTerm' term sink = case term of
+    Let (Name n) (Read (_ :: Input a)) _ ->
+      let
+          (dynSink, _) = unsafeLookup "evalReducerTerm'" n sinks
+
+          a'sink :: Sink a
+          a'sink = unsafeFromDyn "evalReducerTerm'" dynSink
+
+          row'sink = unmap (decodeRow . dropTag) a'sink
+      in
+          row'sink
+  where
+    sinks = evalReducerTerm sink term
 
 ------------------------------------------------------------------------
 
