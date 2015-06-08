@@ -72,6 +72,9 @@ renameTerm gen0 names term = case term of
         in
             (gen2, Let (Name n') tl' tm')
 
+rename :: (Ord n, Show n) => Term n a -> Term Int a
+rename = snd . renameTerm [1..] M.empty
+
 ------------------------------------------------------------------------
 -- Substitution
 
@@ -312,6 +315,17 @@ ioOfTerm term = M.unionWith S.union is os
     is = M.map (S.map (fmap I)) (inputsOfTerm M.empty term)
     os = M.map (S.map (fmap O)) (outputsOfTerm term)
 
+maximumTag :: (Show n, Ord n) => Term n a -> Maybe Tag
+maximumTag = maximum
+           . concatMap (map (tagOfInOut . unDist) . S.toList)
+           . M.elems
+           . ioOfTerm
+
+tagOfInOut :: InOut -> Maybe Tag
+tagOfInOut (I (ReducerInput x)) = Just x
+tagOfInOut (O (MapperOutput x)) = Just x
+tagOfInOut _                    = Nothing
+
 ------------------------------------------------------------------------
 -- Input/Output Relation Helpers
 
@@ -325,8 +339,8 @@ consistentIO ios = all isM (S.toList ios)
 
     isR = not . isM
 
-printIO :: (Show n, Ord n) => Term n a -> IO ()
-printIO term = mapM_ go
+printInconsistentIO :: (Show n, Ord n) => Term n a -> IO ()
+printInconsistentIO term = mapM_ go
              . sort
              . map (\(x,y) -> (y,x))
              . filter (\(_,ios) -> not (consistentIO (S.map unDist ios)))
@@ -340,6 +354,23 @@ printIO term = mapM_ go
 --------------------------------------------------------------------------
 -- Find where to fix inconsistent IO for ReducerInput/MapperOutput
 -- mismatches
+
+fixR2M :: (Show n, Ord n) => [FilePath] -> Term n a -> Term n a
+fixR2M temps term = snd $ foldl go (temps, term) ns
+  where
+    go ((t:ts), tm) n = (ts, passthroughR2M t n tm)
+
+    ns = findR2M (ioOfTerm term)
+
+passthroughR2M :: Eq n => FilePath -> n -> Term n a -> Term n a
+passthroughR2M temp n term = case term of
+    Return  x    -> Return  x
+    Write o x tm -> Write o x (passthroughR2M temp n tm)
+    Let name@(Name n') tl tm
+      | n /= n'   -> Let (Name n') tl (passthroughR2M temp n tm)
+      | otherwise -> Let name tl $
+                     Write (ReducerOutput temp) (Var name) $
+                     Let name (Read (MapperInput temp)) tm
 
 -- TODO `findR2M` is where we split post-GBK chains and at the moment
 -- TODO we are making a terrible choice! We should instead use some
@@ -363,7 +394,27 @@ findR2M = map snd
       _                                 -> Nothing
 
 --------------------------------------------------------------------------
--- Find where
+-- Find where to fix inconsistent IO for MapperInput/ReducerOutput
+-- mismatches
+
+fixM2R :: (Show n, Ord n) => Term n a -> Term n a
+fixM2R term = snd $ foldl go (tag, term) ns
+  where
+    go (t, tm) n = ( nextTag "fixM2R" t
+                   , passthroughM2R t n tm)
+
+    tag = maybe 0 (nextTag "fixM2R") (maximumTag term)
+    ns  = findM2R (ioOfTerm term)
+
+passthroughM2R :: Eq n => Tag -> n -> Term n a -> Term n a
+passthroughM2R tag n term = case term of
+    Return  x    -> Return  x
+    Write o x tm -> Write o x (passthroughM2R tag n tm)
+    Let name@(Name n') tl tm
+      | n /= n'   -> Let (Name n') tl (passthroughM2R tag n tm)
+      | otherwise -> Let name tl $
+                     Write (MapperOutput tag) (Var name) $
+                     Let name (Read (ReducerInput tag)) tm
 
 -- | Find MapperInput -> ReducerOutput names.
 findM2R :: Ord n => Map n (Set (DistTo InOut)) -> [n]
@@ -386,6 +437,9 @@ findM2R = map snd
 
 freshNames :: [String]
 freshNames = map (\x -> "x" ++ show x) ([1..] :: [Integer])
+
+tempPaths :: [FilePath]
+tempPaths = map (\x -> show x ++ ".tmp") ([1..] :: [Integer])
 
 nextTag :: String -> Tag -> Tag
 nextTag msg tag | tag /= maxBound = succ tag
@@ -445,7 +499,7 @@ sinkConcatOfTerm fresh env term = case term of
     Write o x tm -> Write o x (sinkConcatOfTerm fresh env tm)
     Return  x    -> Return  x
   where
-    lets :: (Typeable n, Typeable a)
+    lets :: (Typeable n, Typeable a, KV a)
          => [(Name n a, Tail n a)]
          -> Term n b
          -> Term n b

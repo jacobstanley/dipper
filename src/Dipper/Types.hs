@@ -260,7 +260,7 @@ data Term n a where
           -> Term n b
 
     -- | Let binding.
-    Let :: (Typeable n, Typeable a)
+    Let :: (Typeable n, Typeable a, KV a)
         => Name n a
         -> Tail n a
         -> Term n b
