@@ -84,12 +84,12 @@ instance {-# OVERLAPPABLE #-} HadoopWritable a => KV a where
     decodeRow (_ :*: x) = decode x
 
 instance {-# OVERLAPPING #-} (HadoopWritable k, HadoopWritable v) => KV (k :*: v) where
-    kvFormat  _         = format (undefined :: v) :*: format (undefined :: v)
+    kvFormat  _         = format (undefined :: k) :*: format (undefined :: v)
     encodeRow (x :*: y) = encode x :*: encode y
     decodeRow (x :*: y) = decode x :*: decode y
 
 instance {-# OVERLAPPING #-} (HadoopWritable k, HadoopWritable v) => KV (k :*: [v]) where
-    kvFormat  _          = format (undefined :: v) :*: format (undefined :: [v])
+    kvFormat  _          = format (undefined :: k) :*: format (undefined :: [v])
     encodeRow (x :*: ys) = encode x :*: encode ys
     decodeRow (x :*: ys) = decode x :*: decode ys
 
