@@ -1,25 +1,28 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE FlexibleContexts #-}
 
 module Dipper.Types where
 
 import           Data.Binary.Get
 import           Data.Binary.Put
-import qualified Data.ByteString as S
+import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as L
 import           Data.Int (Int32, Int64)
-import           Data.Word (Word8)
 import           Data.String (IsString(..))
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import           Data.Typeable (Typeable, typeOf)
+import           Data.Word (Word8)
 
 import           Dipper.Binary
+import           Dipper.Product
 
 ------------------------------------------------------------------------
 
@@ -38,17 +41,17 @@ data Format = Format {
 
 ------------------------------------------------------------------------
 
-type Row a = a :*: S.ByteString :*: S.ByteString
+type Row a = a :*: B.ByteString :*: B.ByteString
 
 hasTag :: Eq a => a -> Row a -> Bool
 hasTag tag (tag' :*: _) = tag == tag'
 
-getLayout :: ByteLayout -> Get S.ByteString
+getLayout :: ByteLayout -> Get B.ByteString
 getLayout VarVInt     = getByteString =<< getVInt
 getLayout VarWord32be = getByteString . fromIntegral =<< getWord32be
 getLayout (Fixed n)   = getByteString n
 
-putLayout :: ByteLayout -> S.ByteString -> Put
+putLayout :: ByteLayout -> B.ByteString -> Put
 putLayout fmt bs = case fmt of
     VarVInt                 -> putVInt     len  >> putByteString bs
     VarWord32be             -> putWord32be lenW >> putByteString bs
@@ -57,8 +60,8 @@ putLayout fmt bs = case fmt of
                                   ++ "expected <" ++ show n ++ " bytes> "
                                   ++ "but was <" ++ show len ++ " bytes>")
   where
-    len  = S.length bs
-    lenW = fromIntegral (S.length bs)
+    len  = B.length bs
+    lenW = fromIntegral (B.length bs)
 
 ------------------------------------------------------------------------
 
@@ -66,12 +69,12 @@ type KVFormat = Format :*: Format
 
 class KV a where
     kvFormat  :: a -> KVFormat
-    encodeRow :: a -> S.ByteString :*: S.ByteString
-    decodeRow :: S.ByteString :*: S.ByteString -> a
+    encodeRow :: a -> B.ByteString :*: B.ByteString
+    decodeRow :: B.ByteString :*: B.ByteString -> a
 
 instance {-# OVERLAPPABLE #-} HadoopWritable a => KV a where
     kvFormat  _         = format () :*: format (undefined :: a)
-    encodeRow        x  = encode     () :*: encode x
+    encodeRow        x  = encode () :*: encode x
     decodeRow (_ :*: x) = decode x
 
 instance {-# OVERLAPPING #-} (HadoopWritable k, HadoopWritable v) => KV (k :*: v) where
@@ -101,13 +104,13 @@ class HadoopWritable a where
     byteLayout :: a -> ByteLayout
 
     -- TODO Horrible, more efficiency to be had here
-    encode :: a -> S.ByteString
-    decode :: S.ByteString -> a
+    encode :: a -> B.ByteString
+    decode :: B.ByteString -> a
 
 instance HadoopWritable () where
     hadoopType _ = "org.apache.hadoop.io.NullWritable"
     byteLayout _ = Fixed 0
-    encode       = const S.empty
+    encode       = const B.empty
     decode       = const ()
 
 instance HadoopWritable Int32 where
@@ -134,7 +137,7 @@ instance HadoopWritable T.Text where
     encode       = T.encodeUtf8
     decode       = T.decodeUtf8
 
-instance HadoopWritable S.ByteString where
+instance HadoopWritable B.ByteString where
     hadoopType _ = "org.apache.hadoop.io.BytesWritable"
     byteLayout _ = VarWord32be
     encode       = id
@@ -143,7 +146,7 @@ instance HadoopWritable S.ByteString where
 instance forall a. HadoopWritable a => HadoopWritable [a] where
     hadoopType _ = "org.apache.hadoop.io.BytesWritable"
     byteLayout _ = VarWord32be
-    encode       = S.concat . map encode
+    encode       = B.concat . map encode
 
     -- TODO likely pretty slow
     decode bs = flip runGet (L.fromStrict bs) getAll
@@ -159,58 +162,47 @@ instance forall a. HadoopWritable a => HadoopWritable [a] where
 
 ------------------------------------------------------------------------
 
-infixr 2 :*:
-infixr 2 <&>
-infixr 1 :+:
-
-data a :*: b = !a :*: !b
-  deriving (Eq, Ord, Show, Typeable)
-
-data a :+: b = L !a | R !b
-  deriving (Eq, Ord, Show, Typeable)
-
-snd' :: a :*: b -> b
-snd' (_ :*: x) = x
-{-# INLINE snd' #-}
-
--- | Sequence actions and put their resulting values into a strict product.
-(<&>) :: Applicative f => f a -> f b -> f (a :*: b)
-(<&>) fa fb = (:*:) <$> fa <*> fb
-{-# INLINE (<&>) #-}
-
-------------------------------------------------------------------------
+newtype Name n a = Name n
+    deriving (Eq, Ord, Show, Typeable)
 
 type Tag = Word8
 
-data Name n a =
-      Name          n
-    | MapperInput   FilePath
-    | MapperOutput  Tag
-    | ReducerInput  Tag
-    | ReducerOutput FilePath
+data Input a = MapperInput FilePath
+             | ReducerInput Tag
     deriving (Eq, Ord, Show, Typeable)
 
-type Name' n = Name n ()
+data Output a = MapperOutput Tag
+              | ReducerOutput FilePath
+    deriving (Eq, Ord, Show, Typeable)
 
 instance IsString (Name String a) where
     fromString = Name
 
+------------------------------------------------------------------------
+
+type Name' n = Name n ()
+type Input'  = Input ()
+type Output' = Output ()
+
 coerceName :: Name n a -> Name n b
-coerceName name = case name of
-    Name          x -> Name          x
-    MapperInput   x -> MapperInput   x
-    MapperOutput  x -> MapperOutput  x
-    ReducerInput  x -> ReducerInput  x
-    ReducerOutput x -> ReducerOutput x
+coerceName (Name n) = Name n
+
+coerceInput :: Input a -> Input b
+coerceInput (MapperInput x)  = MapperInput x
+coerceInput (ReducerInput x) = ReducerInput x
+
+coerceOutput :: Output a -> Output b
+coerceOutput (MapperOutput x)  = MapperOutput x
+coerceOutput (ReducerOutput x) = ReducerOutput x
 
 ------------------------------------------------------------------------
 
 data Atom n a where
 
     -- | Variables.
-    Var   :: (Typeable n, Typeable a)
-          => Name n a
-          -> Atom n a
+    Var :: (Typeable n, Typeable a)
+        => Name n a
+        -> Atom n a
 
     -- | Constants.
     Const :: (Typeable n, Typeable a)
@@ -221,6 +213,17 @@ data Atom n a where
 
 
 data Tail n a where
+
+    -- | Read from a source.
+    Read :: (Typeable n, Typeable a, KV a)
+         => Input a
+         -> Tail n a
+
+    -- | Write to a sink.
+    Write :: (Typeable n, Typeable a, KV a)
+          => Output a
+          -> Atom n a
+          -> Tail n ()
 
     -- | Flatten from the FlumeJava paper.
     Concat :: (Typeable n, Typeable a)
@@ -258,44 +261,49 @@ data Term n a where
         -> Term n b
 
     -- | Result of term.
-    Ret :: (Typeable n)
-        => Tail n a
-        -> Term n a
+    Return :: (Typeable n)
+           => Atom n a
+           -> Term n a
 
   deriving (Typeable)
 
 ------------------------------------------------------------------------
 
 instance Show n => Show (Atom n a) where
-  showsPrec p x = showParen (p > app) $ case x of
-      Var n   -> showString "Var " . showsPrec (app+1) n
+  showsPrec p x = showParen' p $ case x of
+      Var n   -> showString "Var " . showForeign n
       Const _ -> showString "Const {..}"
-    where
-      app = 10
 
 instance Show n => Show (Tail n a) where
-  showsPrec p tl = showParen (p > app) $ case tl of
-      Concat        xss -> showString "Concat "     . showsPrec (app+1) xss
-      ConcatMap   f  xs -> showString "ConcatMap "  . showsPrec (app+1) (typeOf f)
+  showsPrec p tl = showParen' p $ case tl of
+      Read       inp    -> showString "Read "       . showForeign inp
+      Write      out xs -> showString "Write "      . showForeign out
                                                     . showString " "
-                                                    . showsPrec (app+1) xs
-      GroupByKey     xs -> showString "GroupByKey " . showsPrec (app+1) xs
-      FoldValues f x xs -> showString "FoldValues " . showsPrec (app+1) (typeOf f)
+                                                    . showForeign xs
+      Concat        xss -> showString "Concat "     . showForeign xss
+      ConcatMap   f  xs -> showString "ConcatMap "  . showForeign (typeOf f)
                                                     . showString " "
-                                                    . showsPrec (app+1) (typeOf x)
+                                                    . showForeign xs
+      GroupByKey     xs -> showString "GroupByKey " . showForeign xs
+      FoldValues f x xs -> showString "FoldValues " . showForeign (typeOf f)
                                                     . showString " "
-                                                    . showsPrec (app+1) xs
-    where
-      app = 10
+                                                    . showForeign (typeOf x)
+                                                    . showString " "
+                                                    . showForeign xs
 
 instance Show n => Show (Term n a) where
-  showsPrec p x = showParen (p > app) $ case x of
-      Let n tl tm -> showString "Let "    . showsPrec (app+1) n
+  showsPrec p x = showParen' p $ case x of
+      Let n tl tm -> showString "Let "    . showForeign n
                                           . showString " "
-                                          . showsPrec (app+1) tl
+                                          . showForeign tl
                                           . showString "\n"
-                                          . showsPrec (app+1) tm
-      Ret   tl    -> showString "Ret "    . showsPrec (app+1) tl
-    where
-      app = 10
+                                          . showForeign tm
+      Return a    -> showString "Return " . showForeign a
 
+------------------------------------------------------------------------
+
+showForeign :: Show a => a -> ShowS
+showForeign = showsPrec 11
+
+showParen' :: Int -> ShowS -> ShowS
+showParen' p = showParen (p > 10)

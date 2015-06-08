@@ -23,7 +23,10 @@ library
   exposed-modules:
     Dipper
     Dipper.AST
+    Dipper.Coproduct
+    Dipper.Examples
     Dipper.Interpreter
+    Dipper.Product
     Dipper.Types
 
   other-modules:
