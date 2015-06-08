@@ -4,7 +4,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
 {-# OPTIONS_GHC -funbox-strict-fields #-}
-{-# OPTIONS_GHC -w #-}
 
 module Dipper.AST where
 
@@ -12,6 +11,7 @@ import           Data.Dynamic
 import           Data.List (sort, nubBy)
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
+import           Data.Maybe (mapMaybe)
 import           Data.Set (Set)
 import qualified Data.Set as S
 import           Data.Tuple (swap)
@@ -180,6 +180,42 @@ dependents combine ns term = case term of
       | otherwise                     = ns
 
 ------------------------------------------------------------------------
+-- Partial term extraction - given a set of variables return a term
+-- consisting of only constructs which depend on those variables.
+
+partialAtom :: Ord n => Set n -> Atom n a -> Maybe (Atom n a)
+partialAtom ns atom = case atom of
+    Const _                      -> Just atom
+    Var (Name n) | S.member n ns -> Just atom
+                 | otherwise     -> Nothing
+
+partialAtoms :: Ord n => Set n -> [Atom n a] -> Maybe [Atom n a]
+partialAtoms ns atoms = case mapMaybe (partialAtom ns) atoms of
+    [] -> Nothing
+    xs -> Just xs
+
+partialTail :: Ord n => Set n -> Tail n a -> Maybe (Tail n a)
+partialTail ns tl = case tl of
+    Read           _ -> Nothing
+    Concat        xs -> Concat         <$> partialAtoms ns xs
+    ConcatMap    f x -> ConcatMap  f   <$> partialAtom  ns x
+    GroupByKey     x -> GroupByKey     <$> partialAtom  ns x
+    FoldValues f v x -> FoldValues f v <$> partialAtom  ns x
+
+partialTerm :: Ord n => Set n -> Term n a -> Term n ()
+partialTerm ns term = case term of
+    Return _     -> Return (Const [])
+    Write o x tm -> case partialAtom ns x of
+                        Nothing -> partialTerm ns tm
+                        Just  _ -> Write o x (partialTerm ns tm)
+
+    Let name@(Name n) tl tm
+      | S.member n ns -> Let name tl (partialTerm ns tm)
+      | otherwise     -> case partialTail ns tl of
+                           Nothing  -> partialTerm ns tm
+                           Just tl' -> Let name tl' (partialTerm (S.insert n ns) tm)
+
+------------------------------------------------------------------------
 -- Remove GroupByKey
 --
 -- Grouping is implicit in the transition from mapper to reducer.
@@ -259,7 +295,7 @@ inputsOfTail :: (Show n, Ord n)
              -> Tail n a
              -> Set (DistTo Input')
 inputsOfTail env tl = case tl of
-    Read          i   -> S.singleton (DistTo (coerceInput i) 0)
+    Read          i   -> S.singleton (DistTo (fromInput i) 0)
     Concat         xs -> S.unions (map (inputsOfAtom env) xs)
     ConcatMap     _ x -> inputsOfAtom env x
     GroupByKey      x -> inputsOfAtom env x
@@ -284,7 +320,7 @@ outputsOfTerm term = case term of
 
       let
           o'tm = outputsOfTerm tm
-          os   = S.singleton (DistTo (coerceOutput o) 0)
+          os   = S.singleton (DistTo (fromOutput o) 0)
           o'x  = M.fromSet (const os) (fvOfAtom x)
       in
           M.unionWith S.union o'tm o'x
@@ -322,9 +358,9 @@ maximumTag = maximum
            . ioOfTerm
 
 tagOfInOut :: InOut -> Maybe Tag
-tagOfInOut (I (ReducerInput x)) = Just x
-tagOfInOut (O (MapperOutput x)) = Just x
-tagOfInOut _                    = Nothing
+tagOfInOut (I (Input'  (ReducerInput x) _)) = Just x
+tagOfInOut (O (Output' (MapperOutput x) _)) = Just x
+tagOfInOut _                               = Nothing
 
 ------------------------------------------------------------------------
 -- Input/Output Relation Helpers
@@ -333,9 +369,9 @@ consistentIO :: Set InOut -> Bool
 consistentIO ios = all isM (S.toList ios)
                 || all isR (S.toList ios)
   where
-    isM (I (MapperInput _))  = True
-    isM (O (MapperOutput _)) = True
-    isM _                    = False
+    isM (I (Input'  (MapperInput  _) _)) = True
+    isM (O (Output' (MapperOutput _) _)) = True
+    isM _                                = False
 
     isR = not . isM
 
@@ -358,6 +394,7 @@ printInconsistentIO term = mapM_ go
 fixR2M :: (Show n, Ord n) => [FilePath] -> Term n a -> Term n a
 fixR2M temps term = snd $ foldl go (temps, term) ns
   where
+    go ([],      _) _ = error "fixR2M: ran out of temporary files"
     go ((t:ts), tm) n = (ts, passthroughR2M t n tm)
 
     ns = findR2M (ioOfTerm term)
@@ -389,9 +426,9 @@ findR2M = map snd
     eq (DistTo x _, _) (DistTo y _, _) = x == y
 
     go s = case S.toAscList s of
-      [ DistTo (I (ReducerInput i)) n,
-        DistTo (O (MapperOutput o)) _ ] -> Just (DistTo (i, o) n)
-      _                                 -> Nothing
+      [ DistTo (I (Input'  (ReducerInput i) _)) n,
+        DistTo (O (Output' (MapperOutput o) _)) _ ] -> Just (DistTo (i, o) n)
+      _                                             -> Nothing
 
 --------------------------------------------------------------------------
 -- Find where to fix inconsistent IO for MapperInput/ReducerOutput
@@ -428,9 +465,9 @@ findM2R = map snd
     eq (DistTo x _, _) (DistTo y _, _) = x == y
 
     go s = case S.toAscList s of
-      [ DistTo (I (MapperInput   i)) n,
-        DistTo (O (ReducerOutput o)) _ ] -> Just (DistTo (i, o) n)
-      _                                  -> Nothing
+      [ DistTo (I (Input'  (MapperInput   i) _)) n,
+        DistTo (O (Output' (ReducerOutput o) _)) _ ] -> Just (DistTo (i, o) n)
+      _                                              -> Nothing
 
 --------------------------------------------------------------------------
 -- Utils
@@ -446,6 +483,13 @@ nextTag msg tag | tag /= maxBound = succ tag
                 | otherwise       = error msg'
   where
     msg' = msg ++ ": exceeded maximum number of reducers <" ++ show tag ++ ">"
+
+unsafeFromDyn :: forall a. Typeable a => String -> Dynamic -> a
+unsafeFromDyn msg x = fromDyn x (error msg')
+  where
+    msg' = msg ++ ": type mismatch: "
+               ++ "expected <" ++ show (typeOf (undefined :: a)) ++ "> "
+               ++ "but was <" ++ show (dynTypeRep x) ++ ">"
 
 unsafeDynLookup :: (Ord k, Show k, Typeable v) => String -> k -> Map k Dynamic -> v
 unsafeDynLookup msg k kvs = fromDyn (unsafeLookup msg k kvs) (error msg')

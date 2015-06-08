@@ -43,6 +43,12 @@ data Format = Format {
 
 type Row a = a :*: B.ByteString :*: B.ByteString
 
+dropTag :: Row a -> B.ByteString :*: B.ByteString
+dropTag (_ :*: x) = x
+
+mapTag :: (a -> b) -> Row a -> Row b
+mapTag f (tag :*: x) = f tag :*: x
+
 hasTag :: Eq a => a -> Row a -> Bool
 hasTag tag (tag' :*: _) = tag == tag'
 
@@ -180,12 +186,17 @@ instance IsString (Name String a) where
 
 ------------------------------------------------------------------------
 
-type Name' n = Name n ()
-type Input'  = Input ()
-type Output' = Output ()
+data Input' = Input' (Input ()) KVFormat
+  deriving (Eq, Ord, Show, Typeable)
 
-coerceName :: Name n a -> Name n b
-coerceName (Name n) = Name n
+data Output' = Output' (Output ()) KVFormat
+  deriving (Eq, Ord, Show, Typeable)
+
+fromInput :: forall a. KV a => Input a -> Input'
+fromInput x = Input' (coerceInput x) (kvFormat (undefined :: a))
+
+fromOutput :: forall a. KV a => Output a -> Output'
+fromOutput x = Output' (coerceOutput x) (kvFormat (undefined :: a))
 
 coerceInput :: Input a -> Input b
 coerceInput (MapperInput x)  = MapperInput x
@@ -277,7 +288,7 @@ instance Show n => Show (Atom n a) where
 
 instance Show n => Show (Tail n a) where
   showsPrec p tl = showParen' p $ case tl of
-      Read       inp    -> showString "Read "       . showForeign inp
+      Read          inp -> showString "Read "       . showForeign inp
       Concat        xss -> showString "Concat "     . showForeign xss
       ConcatMap   f  xs -> showString "ConcatMap "  . showForeign (typeOf f)
                                                     . showString " "
