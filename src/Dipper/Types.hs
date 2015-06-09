@@ -25,6 +25,37 @@ import           Dipper.Binary
 
 ------------------------------------------------------------------------
 
+data Row a = Row !a !B.ByteString !B.ByteString
+  deriving (Eq, Ord, Show)
+
+------------------------------------------------------------------------
+
+mkRow :: a -> Pair B.ByteString B.ByteString -> Row a
+mkRow tag (k :!: v) = Row tag k v
+
+unTag :: Row a -> Pair B.ByteString B.ByteString
+unTag (Row _ k v) = k :!: v
+
+withTag :: t -> Row a -> Row t
+withTag t (Row _ k v) = Row t k v
+
+mapTag :: (a -> b) -> Row a -> Row b
+mapTag f (Row tag k v) = Row (f tag) k v
+
+hasTag :: Eq a => a -> Row a -> Bool
+hasTag tag (Row tag' _ _) = tag == tag'
+
+rowTag :: Row a -> a
+rowTag (Row tag _ _) = tag
+
+rowKey :: Row a -> B.ByteString
+rowKey (Row _ key _) = key
+
+rowValue :: Row a -> B.ByteString
+rowValue (Row _ _ value) = value
+
+------------------------------------------------------------------------
+
 type HadoopType = T.Text
 
 data ByteLayout =
@@ -38,22 +69,9 @@ data Format = Format {
   , fmtLayout :: !ByteLayout
   } deriving (Eq, Ord, Show)
 
+type KVFormat = Pair Format Format
+
 ------------------------------------------------------------------------
-
-data Row a = Row !a !B.ByteString !B.ByteString
-  deriving (Eq, Ord, Show)
-
-mkRow :: a -> Pair B.ByteString B.ByteString -> Row a
-mkRow tag (k :!: v) = Row tag k v
-
-dropTag :: Row a -> Pair B.ByteString B.ByteString
-dropTag (Row _ k v) = k :!: v
-
-mapTag :: (a -> b) -> Row a -> Row b
-mapTag f (Row tag k v) = Row (f tag) k v
-
-hasTag :: Eq a => a -> Row a -> Bool
-hasTag tag (Row tag' _ _) = tag == tag'
 
 getLayout :: ByteLayout -> Get B.ByteString
 getLayout VarVInt     = getByteString =<< getVInt
@@ -74,27 +92,25 @@ putLayout fmt bs = case fmt of
 
 ------------------------------------------------------------------------
 
-type KVFormat = Pair Format Format
-
 class KV a where
-    kvFormat  :: a -> KVFormat
-    encodeRow :: a -> Pair B.ByteString B.ByteString
-    decodeRow :: Pair B.ByteString B.ByteString -> a
+    kvFormat :: a -> KVFormat
+    encodeKV :: a -> Row ()
+    decodeKV :: Row t -> a
 
 instance {-# OVERLAPPABLE #-} HadoopWritable a => KV a where
-    kvFormat  _         = format () :!: format (undefined :: a)
-    encodeRow        x  = encode () :!: encode x
-    decodeRow (_ :!: x) = decode x
+    kvFormat  _          = format () :!: format (undefined :: a)
+    encodeKV          x  = Row () (encode ()) (encode x)
+    decodeKV (Row _ _ x) = decode x
 
 instance {-# OVERLAPPING #-} (HadoopWritable k, HadoopWritable v) => KV (Pair k v) where
-    kvFormat  _         = format (undefined :: k) :!: format (undefined :: v)
-    encodeRow (x :!: y) = encode x :!: encode y
-    decodeRow (x :!: y) = decode x :!: decode y
+    kvFormat  _          = format (undefined :: k) :!: format (undefined :: v)
+    encodeKV (x :!: y)   = Row () (encode x) (encode y)
+    decodeKV (Row _ x y) = decode x :!: decode y
 
 instance {-# OVERLAPPING #-} (HadoopWritable k, HadoopWritable v) => KV (Pair k [v]) where
-    kvFormat  _          = format (undefined :: k) :!: format (undefined :: [v])
-    encodeRow (x :!: ys) = encode x :!: encode ys
-    decodeRow (x :!: ys) = decode x :!: decode ys
+    kvFormat  _           = format (undefined :: k) :!: format (undefined :: [v])
+    encodeKV (x :!: ys)   = Row () (encode x) (encode ys)
+    decodeKV (Row _ x ys) = decode x :!: decode ys
 
 ------------------------------------------------------------------------
 

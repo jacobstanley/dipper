@@ -39,6 +39,7 @@ library
     , directory         >= 1.2
     , file-embed        >= 0.0
     , filepath          >= 1.4
+    , mtl               >= 2.2
     , pipes             >= 4.1
     , pipes-text        >= 0.0
     , process           >= 1.2

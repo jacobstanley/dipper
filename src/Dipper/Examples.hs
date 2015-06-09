@@ -3,6 +3,7 @@
 
 module Dipper.Examples where
 
+import           Data.Monoid ((<>))
 import           Data.Text (Text)
 import qualified Data.Text as T
 import           Data.Tuple.Strict (Pair(..))
@@ -138,3 +139,21 @@ example3 =
     gbk1    = "gbk1"
     gbk2    = "gbk2"
 
+------------------------------------------------------------------------
+
+example4 :: Term String ()
+example4 =
+    Let x0 (Read input) $
+    Let x1 (ConcatMap (\(k :!: v) -> [k :!: T.toUpper v]) (Var x0)) $
+    Let x2 (GroupByKey (Var x1)) $
+    Let x3 (FoldValues (\x y -> x <> ":" <> y) "" (Var x2)) $
+    Write output (Var x3) $
+    Return (Const [])
+  where
+    input  = MapperInput   "input.csv"  :: Input (Pair Text Text)
+    output = ReducerOutput "output.csv" :: Output (Pair Text Text)
+
+    x0 = "x0"
+    x1 = "x1"
+    x2 = "x2"
+    x3 = "x3"
