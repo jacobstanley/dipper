@@ -28,12 +28,12 @@ import           Data.Set (Set)
 import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
+import           Data.Tuple.Strict (Pair(..))
 import           Data.Typeable (Typeable)
 import           Data.Word (Word8)
 
 import           Dipper.AST
 import           Dipper.Binary
-import           Dipper.Product
 import           Dipper.Sink
 import           Dipper.Types
 
@@ -111,7 +111,7 @@ mkPipeline term = foldMap mkStep
 
     isRoot (DistTo _ d) = d == 0
 
-    kvUnit = unitFormat :*: unitFormat
+    kvUnit = unitFormat :!: unitFormat
 
 ------------------------------------------------------------------------
 
@@ -174,12 +174,12 @@ evalTail sink tl = case tl of
       in
           fvOfAtom x `withElem` (toDyn sink', dynDup sink')
 
-    FoldValues f v (x :: Atom n (k :*: [v])) ->
+    FoldValues f v (x :: Atom n (Pair k [v])) ->
       let
-          g :: k :*: [v] -> k :*: v
-          g (k :*: vs) = k :*: foldl' f v vs
+          g :: Pair k [v] -> Pair k v
+          g (k :!: vs) = k :!: foldl' f v vs
 
-          sink' :: Sink (k :*: [v])
+          sink' :: Sink (Pair k [v])
           sink' = unmap g (unsafeFromDyn "evalTail" sink)
       in
           fvOfAtom x `withElem` (toDyn sink', dynDup sink')
@@ -195,7 +195,7 @@ evalMapperTerm sink term = case term of
     Write (MapperOutput tag :: Output a) (Var (Name n)) tm ->
       let
           enc :: a -> Row Tag
-          enc x = tag :*: encodeRow x
+          enc x = mkRow tag (encodeRow x)
 
           sink' = unmap enc sink
           sinks = evalMapperTerm sink tm
@@ -238,7 +238,7 @@ evalReducerTerm sink term = case term of
     Write (ReducerOutput path :: Output a) (Var (Name n)) tm ->
       let
           enc :: a -> Row FilePath
-          enc x = path :*: encodeRow x
+          enc x = mkRow path (encodeRow x)
 
           sink' = unmap enc sink
           sinks = evalReducerTerm sink tm
@@ -288,14 +288,14 @@ getTagged schema = do
     tag <- getWord8
     case M.lookup tag schema of
       Nothing              -> fail ("getTagged: invalid tag <" ++ show tag ++ ">")
-      Just (kFmt :*: vFmt) -> pure tag <&> getLayout (fmtLayout kFmt)
-                                       <&> getLayout (fmtLayout vFmt)
+      Just (kFmt :!: vFmt) -> Row tag <$> getLayout (fmtLayout kFmt)
+                                      <*> getLayout (fmtLayout vFmt)
 
 putTagged :: Map Tag KVFormat -> Row Tag -> Put
-putTagged schema (tag :*: k :*: v) =
+putTagged schema (Row tag k v) =
     case M.lookup tag schema of
       Nothing              -> fail ("putTagged: invalid tag <" ++ show tag ++ ">")
-      Just (kFmt :*: vFmt) -> putWord8 tag >> putLayout (fmtLayout kFmt) k
+      Just (kFmt :!: vFmt) -> putWord8 tag >> putLayout (fmtLayout kFmt) k
                                            >> putLayout (fmtLayout vFmt) v
 
 ------------------------------------------------------------------------
@@ -314,9 +314,9 @@ int32Format = format (undefined :: Int32)
 
 testEncDecTagged = take 10 (decodeTagged schema (encodeTagged schema xs))
   where
-    xs = cycle [ 67 :*: "abcdefg" :*: B.empty
-               , 67 :*: "123"     :*: B.empty
-               , 22 :*: "1234"    :*: "Hello World!" ]
+    xs = cycle [ Row 67 "abcdefg" B.empty
+               , Row 67 "123"     B.empty
+               , Row 22 "1234"    "Hello World!" ]
 
-    schema = M.fromList [ (67, textFormat  :*: unitFormat)
-                        , (22, int32Format :*: bytesFormat) ]
+    schema = M.fromList [ (67, textFormat  :!: unitFormat)
+                        , (22, int32Format :!: bytesFormat) ]

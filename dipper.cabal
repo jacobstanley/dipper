@@ -23,10 +23,8 @@ library
   exposed-modules:
     Dipper
     Dipper.AST
-    Dipper.Coproduct
     Dipper.Examples
     Dipper.Interpreter
-    Dipper.Product
     Dipper.Types
 
   other-modules:
@@ -42,9 +40,9 @@ library
     , file-embed        >= 0.0
     , filepath          >= 1.4
     , pipes             >= 4.1
-    , pipes-group       >= 1.0
     , pipes-text        >= 0.0
     , process           >= 1.2
     , process-streaming >= 0.7
     , reinterpret-cast  >= 0.1
+    , strict-base-types >= 0.3
     , text              >= 1.2

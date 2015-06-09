@@ -5,8 +5,8 @@ module Dipper.Examples where
 
 import           Data.Text (Text)
 import qualified Data.Text as T
+import           Data.Tuple.Strict (Pair(..))
 
-import           Dipper.Product
 import           Dipper.Types
 
 ------------------------------------------------------------------------
@@ -61,14 +61,14 @@ example2 =
     add1 :: Int -> [Int]
     add1 x = [x+1]
 
-    kv_add1 :: Text :*: Int -> [Text :*: Int]
-    kv_add1 (k :*: v) = [k :*: v+1]
+    kv_add1 :: Pair Text Int -> [Pair Text Int]
+    kv_add1 (k :!: v) = [k :!: v+1]
 
-    tag :: Int -> a -> [Int :*: a]
-    tag ix x = [ix :*: x]
+    tag :: Int -> a -> [Pair Int a]
+    tag ix x = [ix :!: x]
 
-    untag :: k :*: v -> [v]
-    untag (_ :*: x) = [x]
+    untag :: Pair k v -> [v]
+    untag (_ :!: x) = [x]
 
     -- i/o
     input1  = MapperInput "input1.csv"
@@ -116,18 +116,18 @@ example3 =
     Let i3      (Read input3) $
     Let concat1 (Concat [Var i1, Var i2]) $
     Let concat2 (Concat [Var i2, Var i3]) $
-    Let text1   (ConcatMap (\(k :*: v) -> [k :*: T.pack (show v)]) (Var concat1)) $
+    Let text1   (ConcatMap (\(k :!: v) -> [k :!: T.pack (show v)]) (Var concat1)) $
     Let gbk1    (GroupByKey (Var text1)) $
     Let gbk2    (GroupByKey (Var concat2)) $
     Write output1 (Var gbk1) $
     Write output2 (Var gbk2) $
     Return (Const [])
   where
-    input1  = MapperInput "in-1.csv" :: Input (Text :*: Int)
+    input1  = MapperInput "in-1.csv" :: Input (Pair Text Int)
     input2  = MapperInput "in-2.csv"
     input3  = MapperInput "in-3.csv"
-    output1 = ReducerOutput "out-1.csv" :: Output (Text :*: [Text])
-    output2 = ReducerOutput "out-1.csv" :: Output (Text :*: [Int])
+    output1 = ReducerOutput "out-1.csv" :: Output (Pair Text [Text])
+    output2 = ReducerOutput "out-1.csv" :: Output (Pair Text [Int])
 
     i1      = "input1"
     i2      = "input2"

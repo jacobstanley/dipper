@@ -5,7 +5,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 module Dipper.Types where
@@ -16,13 +15,13 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as L
 import           Data.Int (Int32, Int64)
 import           Data.String (IsString(..))
+import           Data.Tuple.Strict (Pair(..))
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import           Data.Typeable (Typeable, typeOf)
 import           Data.Word (Word8)
 
 import           Dipper.Binary
-import           Dipper.Product
 
 ------------------------------------------------------------------------
 
@@ -41,16 +40,20 @@ data Format = Format {
 
 ------------------------------------------------------------------------
 
-type Row a = a :*: B.ByteString :*: B.ByteString
+data Row a = Row !a !B.ByteString !B.ByteString
+  deriving (Eq, Ord, Show)
 
-dropTag :: Row a -> B.ByteString :*: B.ByteString
-dropTag (_ :*: x) = x
+mkRow :: a -> Pair B.ByteString B.ByteString -> Row a
+mkRow tag (k :!: v) = Row tag k v
+
+dropTag :: Row a -> Pair B.ByteString B.ByteString
+dropTag (Row _ k v) = k :!: v
 
 mapTag :: (a -> b) -> Row a -> Row b
-mapTag f (tag :*: x) = f tag :*: x
+mapTag f (Row tag k v) = Row (f tag) k v
 
 hasTag :: Eq a => a -> Row a -> Bool
-hasTag tag (tag' :*: _) = tag == tag'
+hasTag tag (Row tag' _ _) = tag == tag'
 
 getLayout :: ByteLayout -> Get B.ByteString
 getLayout VarVInt     = getByteString =<< getVInt
@@ -71,27 +74,27 @@ putLayout fmt bs = case fmt of
 
 ------------------------------------------------------------------------
 
-type KVFormat = Format :*: Format
+type KVFormat = Pair Format Format
 
 class KV a where
     kvFormat  :: a -> KVFormat
-    encodeRow :: a -> B.ByteString :*: B.ByteString
-    decodeRow :: B.ByteString :*: B.ByteString -> a
+    encodeRow :: a -> Pair B.ByteString B.ByteString
+    decodeRow :: Pair B.ByteString B.ByteString -> a
 
 instance {-# OVERLAPPABLE #-} HadoopWritable a => KV a where
-    kvFormat  _         = format () :*: format (undefined :: a)
-    encodeRow        x  = encode () :*: encode x
-    decodeRow (_ :*: x) = decode x
+    kvFormat  _         = format () :!: format (undefined :: a)
+    encodeRow        x  = encode () :!: encode x
+    decodeRow (_ :!: x) = decode x
 
-instance {-# OVERLAPPING #-} (HadoopWritable k, HadoopWritable v) => KV (k :*: v) where
-    kvFormat  _         = format (undefined :: k) :*: format (undefined :: v)
-    encodeRow (x :*: y) = encode x :*: encode y
-    decodeRow (x :*: y) = decode x :*: decode y
+instance {-# OVERLAPPING #-} (HadoopWritable k, HadoopWritable v) => KV (Pair k v) where
+    kvFormat  _         = format (undefined :: k) :!: format (undefined :: v)
+    encodeRow (x :!: y) = encode x :!: encode y
+    decodeRow (x :!: y) = decode x :!: decode y
 
-instance {-# OVERLAPPING #-} (HadoopWritable k, HadoopWritable v) => KV (k :*: [v]) where
-    kvFormat  _          = format (undefined :: k) :*: format (undefined :: [v])
-    encodeRow (x :*: ys) = encode x :*: encode ys
-    decodeRow (x :*: ys) = decode x :*: decode ys
+instance {-# OVERLAPPING #-} (HadoopWritable k, HadoopWritable v) => KV (Pair k [v]) where
+    kvFormat  _          = format (undefined :: k) :!: format (undefined :: [v])
+    encodeRow (x :!: ys) = encode x :!: encode ys
+    decodeRow (x :!: ys) = decode x :!: decode ys
 
 ------------------------------------------------------------------------
 
@@ -243,15 +246,15 @@ data Tail n a where
 
     -- | GroupByKey from the FlumeJava paper.
     GroupByKey :: (Typeable n, Typeable k, Typeable v, Eq k, HadoopWritable k, HadoopWritable v)
-               => Atom n (k :*:  v )
-               -> Tail n (k :*: [v])
+               => Atom n (Pair k v)
+               -> Tail n (Pair k [v])
 
     -- | CombineValues from the FlumeJava paper.
     FoldValues :: (Typeable n, Typeable k, Typeable v)
                => (v -> v -> v)
                -> v
-               -> Atom n (k :*: [v])
-               -> Tail n (k :*:  v )
+               -> Atom n (Pair k [v])
+               -> Tail n (Pair k v)
 
   deriving (Typeable)
 
