@@ -150,14 +150,20 @@ example4 =
     Let x0 (Read input) $
     Let x1 (ConcatMap (\(k :!: v) -> [k :!: T.toUpper v]) (Var x0)) $
     Let x2 (GroupByKey (Var x1)) $
+    Write output3 (Var x2) $
     Let x3 (FoldValues (\x y -> x <> ", " <> y) id id (Var x2)) $
-    Write output (Var x3) $
+    Let x4 (FoldValues (\x _ -> x + 1 :: Int) (const 1) (T.pack . show) (Var x2)) $
+    Write output1 (Var x3) $
+    Write output2 (Var x4) $
     Return (Const [])
   where
-    input  = MapperInput   "input.csv"  :: Input  (Pair Text Text)
-    output = ReducerOutput "output.csv" :: Output (Pair Text Text)
+    input   = MapperInput   "input.csv"   :: Input  (Pair Text Text)
+    output1 = ReducerOutput "output1.csv" :: Output (Pair Text Text)
+    output2 = ReducerOutput "output2.csv" :: Output (Pair Text Text)
+    output3 = ReducerOutput "output3.csv" :: Output (Pair Text Text)
 
     x0 = "x0"
     x1 = "x1"
     x2 = "x2"
     x3 = "x3"
+    x4 = "x4"

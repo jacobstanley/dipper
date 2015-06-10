@@ -44,6 +44,7 @@ import           Debug.Trace
 import           Data.Conduit ((=$=), ($$), yield)
 import           Data.Conduit (Source, Sink, Consumer, Producer, Conduit)
 import qualified Data.Conduit as C
+import           Data.Conduit.Internal (zipSinks)
 import qualified Data.Conduit.List as C
 
 ------------------------------------------------------------------------
@@ -137,12 +138,11 @@ testPipeline p@Pipeline{..} files = foldl runStage files stages
             sink   = stepExec tagSink
 
         runReducer :: [Row Tag] -> [Row FilePath]
-        runReducer irows = traceShowId orows
+        runReducer irows = orows
           where
             orows = execState (irows' $$ sink) []
 
             irows' = C.sourceList
-                   . traceShowId
                    . decodeTagRows schema
                    . encodeTagRows schema
                    $ irows
@@ -150,7 +150,8 @@ testPipeline p@Pipeline{..} files = foldl runStage files stages
             sink = void
                  . C.sequenceSinks
                  . M.elems
-                 . M.mapWithKey (\tag r -> C.filter (hasTag tag)
+                 . M.mapWithKey (\tag r -> C.map traceShowId
+                                       =$= C.filter (hasTag tag)
                                        =$= C.map (withTag ())
                                        =$= stepExec r fileSink)
                  $ pReducers
@@ -312,7 +313,7 @@ instance Show (DynDup m) where
 fromDynSink :: (Typeable m, Typeable a) => String -> DynSink m -> Sink a m ()
 fromDynSink msg (DynSink x) = unsafeFromDyn msg x
 
-dynDup :: forall m a. (Monad m, Typeable m, Typeable a) => Sink a m () -> DynDup m
+dynDup :: forall m a. (Show a, Monad m, Typeable m, Typeable a) => Sink a m () -> DynDup m
 dynDup _ = DynDup (\x y -> dynSink (dup (fromDynSink "dynDup" x :: Sink a m ())
                                         (fromDynSink "dynDup" y :: Sink a m ())))
 
@@ -321,8 +322,11 @@ dynJoin :: (DynSink m, DynDup m)
         -> (DynSink m, DynDup m)
 dynJoin (s0, DynDup d) (s1, _) = (d s0 s1, DynDup d)
 
-dup :: Monad m => Sink a m () -> Sink a m () -> Sink a m ()
-dup s1 s2 = C.sequenceSinks [s1, s2] >> return ()
+dup :: (Show a, Monad m) => Sink a m () -> Sink a m () -> Sink a m ()
+dup s1 s2 = zipSinks s1' s2' >> return ()
+  where
+    s1' = C.map (\x -> trace ("1: " ++ show x) x) =$= s1
+    s2' = C.map (\x -> trace ("2: " ++ show x) x) =$= s2
 
 ------------------------------------------------------------------------
 
@@ -389,7 +393,7 @@ evalTail sink tl = case tl of
           sink'kw = fromDynSink "evalTail" sink
 
           sink'kv :: Sink (Pair k v) m ()
-          sink'kv = test'foldValues step begin done =$= sink'kw
+          sink'kv = test'foldValues step begin done =$= C.map traceShowId =$= sink'kw
       in
           (dynSink sink'kv, dynDup sink'kv) `withName` fvOfAtom input
   where

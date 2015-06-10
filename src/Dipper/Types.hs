@@ -250,23 +250,23 @@ data Tail n a where
          -> Tail n a
 
     -- | Flatten from the FlumeJava paper.
-    Concat :: (Typeable n, Typeable a)
+    Concat :: (Typeable n, Typeable a, Show a)
            => [Atom n a]
            ->  Tail n a
 
     -- | ParallelDo from the FlumeJava paper.
-    ConcatMap :: (Typeable n, Typeable a, Typeable b)
+    ConcatMap :: (Typeable n, Typeable a, Typeable b, Show a, Show b)
               => (a -> [b])
               -> Atom n a
               -> Tail n b
 
     -- | GroupByKey from the FlumeJava paper.
-    GroupByKey :: (Typeable n, Typeable k, Typeable v, Eq k, HadoopWritable k, HadoopWritable v)
+    GroupByKey :: (Typeable n, Typeable k, Typeable v, Eq k, HadoopWritable k, HadoopWritable v, Show k, Show v)
                => Atom n (Pair k v)
                -> Tail n (Pair k v)
 
     -- | CombineValues from the FlumeJava paper.
-    FoldValues :: (Typeable n, Typeable x, Typeable k, Typeable v, Typeable w, Eq k, Show x)
+    FoldValues :: (Typeable n, Typeable x, Typeable k, Typeable v, Typeable w, Eq k, Show x, Show k, Show v, Show w)
                => (x -> v -> x)
                -> (v -> x)
                -> (x -> w)
@@ -284,14 +284,14 @@ data Term n a where
            -> Term n a
 
     -- | Write to an output.
-    Write :: (Typeable n, Typeable a, KV a)
+    Write :: (Typeable n, Typeable a, KV a, Show a)
           => Output a
           -> Atom n a
           -> Term n b
           -> Term n b
 
     -- | Let binding.
-    Let :: (Typeable n, Typeable a, KV a)
+    Let :: (Typeable n, Typeable a, KV a, Show a)
         => Name n a
         -> Tail n a
         -> Term n b
