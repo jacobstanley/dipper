@@ -53,9 +53,9 @@ data Step i o = Step {
     stepInput   ::  Formatted i
   , stepOutputs :: [Formatted o]
   , stepTerm    :: Term Int ()
-  , stepExec    :: (Applicative f, Typeable f)
-                => Sink f (Row o)
-                -> Sink f (Row ())
+  , stepExec    :: (Monad m, Typeable m)
+                => Sink m (Row o)
+                -> Sink m (Row ())
   }
 
 type Mapper  = Step FilePath Tag
@@ -155,10 +155,10 @@ testPipeline p@Pipeline{..} files = foldl runStage files stages
             schema     = M.map (\r -> fFormat (stepInput r)) pReducers
 
     tagSink :: MonadState [Row Tag] m => Sink m (Row Tag)
-    tagSink = Sink (\x -> modify (++[x]))
+    tagSink = Sink (\x s -> modify (++[x]) >> return s) ()
 
     fileSink :: MonadState [Row FilePath] m => Sink m (Row FilePath)
-    fileSink = Sink (\x -> modify (++[x]))
+    fileSink = Sink (\x s -> modify (++[x]) >> return s) ()
 
 ------------------------------------------------------------------------
 
@@ -293,74 +293,77 @@ outputTags msg = map go
 
 ------------------------------------------------------------------------
 
-newtype DynSink (f :: * -> *) = DynSink Dynamic
+newtype DynSink (m :: * -> *) = DynSink Dynamic
     deriving (Show)
 
-dynSink :: (Typeable f, Typeable a) => Sink f a -> DynSink f
+dynSink :: (Typeable m, Typeable a) => Sink m a -> DynSink m
 dynSink = DynSink . toDyn
 
 ------------------------------------------------------------------------
 
-newtype DynDup f = DynDup (DynSink f -> DynSink f -> DynSink f)
+newtype DynDup m = DynDup (DynSink m -> DynSink m -> DynSink m)
 
-instance Show (DynDup f) where
+instance Show (DynDup m) where
     showsPrec p _ = showParen (p > 10) (showString "DynDup")
 
-fromDynSink :: (Typeable f, Typeable a) => String -> DynSink f -> Sink f a
+fromDynSink :: (Typeable m, Typeable a) => String -> DynSink m -> Sink m a
 fromDynSink msg (DynSink x) = unsafeFromDyn msg x
 
-dynDup :: forall f a. (Applicative f, Typeable f, Typeable a) => Sink f a -> DynDup f
-dynDup _ = DynDup (\x y -> dynSink (dup (fromDynSink "dynDup" x :: Sink f a)
-                                        (fromDynSink "dynDup" y :: Sink f a)))
+dynDup :: forall m a. (Monad m, Typeable m, Typeable a) => Sink m a -> DynDup m
+dynDup _ = DynDup (\x y -> dynSink (dup (fromDynSink "dynDup" x :: Sink m a)
+                                        (fromDynSink "dynDup" y :: Sink m a)))
 
-dynJoin :: (DynSink f, DynDup f)
-        -> (DynSink f, DynDup f)
-        -> (DynSink f, DynDup f)
+dynJoin :: (DynSink m, DynDup m)
+        -> (DynSink m, DynDup m)
+        -> (DynSink m, DynDup m)
 dynJoin (s0, DynDup d) (s1, _) = (d s0 s1, DynDup d)
 
 ------------------------------------------------------------------------
 
 -- TODO constants broken at the moment
 
-evalTail :: forall f n a. (Applicative f, Typeable f, Ord n)
-         => DynSink f
+evalTail :: forall m n a. (Monad m, Typeable m, Ord n)
+         => DynSink m
          -> Tail n a
-         -> Map n (DynSink f, DynDup f)
+         -> Map n (DynSink m, DynDup m)
 evalTail sink tl = case tl of
     Read _        -> M.empty
     GroupByKey _  -> error "evalTail: found GroupByKey"
     Concat (xs :: [Atom n a]) ->
       let
-          sink' :: Sink f a
+          sink' :: Sink m a
           sink' = fromDynSink "evalTail" sink
       in
-          fvOfAtoms xs `withElem` (dynSink sink', dynDup sink')
+          (dynSink sink', dynDup sink') `withName` fvOfAtoms xs
 
     ConcatMap (f :: b -> [a]) x ->
       let
-          sink' :: Sink f b
+          sink' :: Sink m b
           sink' = unmap f (unconcat (fromDynSink "evalTail" sink))
       in
-          fvOfAtom x `withElem` (dynSink sink', dynDup sink')
+          (dynSink sink', dynDup sink') `withName` fvOfAtom x
 
     FoldValues f v (x :: Atom n (Pair k [v])) ->
       let
+          -- TODO although this works, we shouldn't really
+          -- TODO materialise the list of values just to
+          -- TODO fold over them.
           g :: Pair k [v] -> Pair k v
           g (k :!: vs) = k :!: foldl' f v vs
 
-          sink' :: Sink f (Pair k [v])
+          sink' :: Sink m (Pair k [v])
           sink' = unmap g (fromDynSink "evalTail" sink)
       in
-          fvOfAtom x `withElem` (dynSink sink', dynDup sink')
+          (dynSink sink', dynDup sink') `withName` fvOfAtom x
   where
-    withElem s v = M.fromSet (const v) s
+    withName v s = M.fromSet (const v) s
 
 ------------------------------------------------------------------------
 
-evalMapperTerm :: (Applicative f, Typeable f, Show n, Ord n)
-               => Sink f (Row Tag)
+evalMapperTerm :: (Monad m, Typeable m, Show n, Ord n)
+               => Sink m (Row Tag)
                -> Term n a
-               -> Map n (DynSink f, DynDup f)
+               -> Map n (DynSink m, DynDup m)
 evalMapperTerm sink term = case term of
     Return _ -> M.empty
 
@@ -384,16 +387,16 @@ evalMapperTerm sink term = case term of
       in
           M.unionWith dynJoin tm'sinks tl'sinks
 
-evalMapperTerm' :: forall f n a. (Applicative f, Typeable f, Show n, Ord n)
+evalMapperTerm' :: forall m n a. (Monad m, Typeable m, Show n, Ord n)
                 => Term n a
-                -> Sink f (Row Tag)
-                -> Sink f (Row ())
+                -> Sink m (Row Tag)
+                -> Sink m (Row ())
 evalMapperTerm' term sink = case term of
     Let (Name n) (Read (_ :: Input b)) _ ->
       let
           (dynSink, _) = unsafeLookup "evalMapperTerm'" n sinks
 
-          a'sink :: Sink f b
+          a'sink :: Sink m b
           a'sink =  fromDynSink "evalMapperTerm'" dynSink
 
           row'sink = unmap decodeKV a'sink
@@ -406,10 +409,10 @@ evalMapperTerm' term sink = case term of
 
 -- TODO evalReducerTerm is virtually the same as evalMapperTerm
 
-evalReducerTerm :: (Applicative f, Typeable f, Show n, Ord n)
-                => Sink f (Row FilePath)
+evalReducerTerm :: (Monad m, Typeable m, Show n, Ord n)
+                => Sink m (Row FilePath)
                 -> Term n a
-                -> Map n (DynSink f, DynDup f)
+                -> Map n (DynSink m, DynDup m)
 evalReducerTerm sink term = case term of
     Return _ -> M.empty
 
@@ -433,16 +436,16 @@ evalReducerTerm sink term = case term of
       in
           M.unionWith dynJoin tm'sinks tl'sinks
 
-evalReducerTerm' :: forall f n a. (Applicative f, Typeable f, Show n, Ord n)
+evalReducerTerm' :: forall m n a. (Monad m, Typeable m, Show n, Ord n)
                  => Term n a
-                 -> Sink f (Row FilePath)
-                 -> Sink f (Row ())
+                 -> Sink m (Row FilePath)
+                 -> Sink m (Row ())
 evalReducerTerm' term sink = case term of
-    Let (Name n) (Read (_ :: Input b)) _ ->
+    Let (Name n) (Read (_ :: Input (Pair k [v]))) _ ->
       let
           (dynSink, _) = unsafeLookup "evalReducerTerm'" n sinks
 
-          a'sink :: Sink f b
+          a'sink :: Sink m b
           a'sink = fromDynSink "evalReducerTerm'" dynSink
 
           row'sink = unmap decodeKV a'sink
