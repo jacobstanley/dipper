@@ -14,7 +14,8 @@
 module Dipper.Interpreter where
 
 import           Control.Monad (mplus, void, forever)
-import           Control.Monad.State (MonadState(..), modify, execState)
+import           Control.Monad.Identity (Identity(..))
+import           Control.Monad.State (MonadState(..), modify, runState, execState)
 import           Data.Binary.Get
 import           Data.Binary.Put
 import qualified Data.ByteString as B
@@ -44,7 +45,6 @@ import           Debug.Trace
 import           Data.Conduit ((=$=), ($$), yield)
 import           Data.Conduit (Source, Sink, Consumer, Producer, Conduit)
 import qualified Data.Conduit as C
-import           Data.Conduit.Internal (zipSinks)
 import qualified Data.Conduit.List as C
 
 ------------------------------------------------------------------------
@@ -58,9 +58,7 @@ data Step i o = Step {
     stepInput   ::  Formatted i
   , stepOutputs :: [Formatted o]
   , stepTerm    :: Term Int ()
-  , stepExec    :: (Monad m, Typeable m)
-                => Sink (Row o) m ()
-                -> Sink (Row ()) m ()
+  , stepExec    :: (Monad m, Typeable m) => Conduit (Row ()) m (Row o)
   }
 
 type Mapper  = Step FilePath Tag
@@ -129,40 +127,38 @@ testPipeline p@Pipeline{..} files = foldl runStage files stages
                         $ rows
 
         runMapper :: Mapper -> L.ByteString -> [Row Tag]
-        runMapper Step{..} bs = orows
+        runMapper Step{..} bs =
+            runIdentity (C.sourceList irows =$= stepExec $$ tagSink)
           where
             path   = fName stepInput
             schema = fFormat stepInput
             irows  = decodeUnitRows schema bs
-            orows  = execState (C.sourceList irows $$ sink) []
-            sink   = stepExec tagSink
+
+        tagSink :: Sink (Row Tag) Identity [Row Tag]
+        tagSink = C.consume
 
         runReducer :: [Row Tag] -> [Row FilePath]
-        runReducer irows = orows
+        runReducer irows = concat orows
           where
-            orows = execState (irows' $$ sink) []
+            orows = runIdentity (irows' $$ sink)
 
             irows' = C.sourceList
                    . decodeTagRows schema
                    . encodeTagRows schema
                    $ irows
 
-            sink = void
-                 . C.sequenceSinks
+            sink = C.sequenceSinks
                  . M.elems
-                 . M.mapWithKey (\tag r -> C.map traceShowId
-                                       =$= C.filter (hasTag tag)
+                 . M.mapWithKey (\tag r -> C.filter (hasTag tag)
                                        =$= C.map (withTag ())
-                                       =$= stepExec r fileSink)
+                                       =$= stepExec r
+                                       =$= fileSink )
                  $ pReducers
 
             schema = M.map (\r -> fFormat (stepInput r)) pReducers
 
-    tagSink :: MonadState [Row Tag] m => Sink (Row Tag) m ()
-    tagSink = put =<< C.consume
-
-    fileSink :: MonadState [Row FilePath] m => Sink (Row FilePath) m ()
-    fileSink = put =<< C.consume
+    fileSink :: Sink (Row FilePath) Identity [Row FilePath]
+    fileSink = C.consume
 
 ------------------------------------------------------------------------
 
@@ -297,36 +293,35 @@ outputTags msg = map go
 
 ------------------------------------------------------------------------
 
-newtype DynSink (m :: * -> *) = DynSink Dynamic
+newtype DynConduit (m :: * -> *) b = DynConduit Dynamic
     deriving (Show)
 
-dynSink :: (Typeable m, Typeable a) => Sink a m () -> DynSink m
-dynSink = DynSink . toDyn
+dynConduit :: (Typeable m, Typeable a, Typeable b) => Conduit a m b -> DynConduit m b
+dynConduit = DynConduit . toDyn
 
 ------------------------------------------------------------------------
 
-newtype DynDup m = DynDup (DynSink m -> DynSink m -> DynSink m)
+newtype DynDup m b = DynDup (DynConduit m b -> DynConduit m b -> DynConduit m b)
 
-instance Show (DynDup m) where
+instance Show (DynDup m b) where
     showsPrec p _ = showParen (p > 10) (showString "DynDup")
 
-fromDynSink :: (Typeable m, Typeable a) => String -> DynSink m -> Sink a m ()
-fromDynSink msg (DynSink x) = unsafeFromDyn msg x
+fromDynConduit :: (Typeable m, Typeable a, Typeable b)
+            => String -> DynConduit m b -> Conduit a m b
+fromDynConduit msg (DynConduit x) = unsafeFromDyn msg x
 
-dynDup :: forall m a. (Show a, Monad m, Typeable m, Typeable a) => Sink a m () -> DynDup m
-dynDup _ = DynDup (\x y -> dynSink (dup (fromDynSink "dynDup" x :: Sink a m ())
-                                        (fromDynSink "dynDup" y :: Sink a m ())))
+dynDup :: forall a m b. (Show a, Monad m, Typeable m, Typeable a, Typeable b)
+       => Conduit a m b -> DynDup m b
+dynDup _ = DynDup (\x y -> dynConduit (dup (fromDynConduit "dynDup" x :: Conduit a m b)
+                                        (fromDynConduit "dynDup" y :: Conduit a m b)))
 
-dynJoin :: (DynSink m, DynDup m)
-        -> (DynSink m, DynDup m)
-        -> (DynSink m, DynDup m)
+dynJoin :: (DynConduit m b, DynDup m b)
+        -> (DynConduit m b, DynDup m b)
+        -> (DynConduit m b, DynDup m b)
 dynJoin (s0, DynDup d) (s1, _) = (d s0 s1, DynDup d)
 
-dup :: (Show a, Monad m) => Sink a m () -> Sink a m () -> Sink a m ()
-dup s1 s2 = zipSinks s1' s2' >> return ()
-  where
-    s1' = C.map (\x -> trace ("1: " ++ show x) x) =$= s1
-    s2' = C.map (\x -> trace ("2: " ++ show x) x) =$= s2
+dup :: (Show a, Monad m) => Conduit a m b -> Conduit a m b -> Conduit a m b
+dup c1 c2 = void (C.sequenceConduits [c1, c2])
 
 ------------------------------------------------------------------------
 
@@ -358,54 +353,53 @@ test'foldValues step begin done = goM =$= C.catMaybes
 
 -- TODO constants broken at the moment
 
-evalTail :: forall m n a. (Monad m, Typeable m, Ord n)
-         => DynSink m
+evalTail :: forall m n a o. (Monad m, Typeable m, Ord n, Show n, Typeable o)
+         => DynConduit m o
          -> Tail n a
-         -> Map n (DynSink m, DynDup m)
-evalTail sink tl = case tl of
+         -> Map n (DynConduit m o, DynDup m o)
+evalTail conduit tl = case tl of
     Read _        -> M.empty
     GroupByKey _  -> error "evalTail: found GroupByKey"
 
     Concat (input :: [Atom n a]) ->
       let
-          sink'a :: Sink a m ()
-          sink'a = fromDynSink "evalTail" sink
+          conduit'a :: Conduit a m o
+          conduit'a = fromDynConduit "evalTail" conduit
       in
-          (dynSink sink'a, dynDup sink'a) `withName` fvOfAtoms input
+          (dynConduit conduit'a, dynDup conduit'a) `withName` fvOfAtoms input
 
     ConcatMap (f     :: b -> [a])
               (input :: Atom n b) ->
       let
-          sink'a :: Sink a m ()
-          sink'a = fromDynSink "evalTail" sink
+          conduit'a :: Conduit a m o
+          conduit'a = fromDynConduit "evalTail" conduit
 
-          sink'b :: Sink b m ()
-          sink'b = C.concatMap f =$= sink'a
+          conduit'b :: Conduit b m o
+          conduit'b = C.concatMap f =$= conduit'a
       in
-          (dynSink sink'b, dynDup sink'b) `withName` fvOfAtom input
+          (dynConduit conduit'b, dynDup conduit'b) `withName` fvOfAtom input
 
     FoldValues (step  :: x -> v -> x)
                (begin :: v -> x)
                (done  :: x -> w)
                (input :: Atom n (Pair k v)) ->
       let
-          sink'kw :: Sink (Pair k w) m ()
-          sink'kw = fromDynSink "evalTail" sink
+          conduit'kw :: Conduit (Pair k w) m o
+          conduit'kw = fromDynConduit "evalTail" conduit
 
-          sink'kv :: Sink (Pair k v) m ()
-          sink'kv = test'foldValues step begin done =$= C.map traceShowId =$= sink'kw
+          conduit'kv :: Conduit (Pair k v) m o
+          conduit'kv = test'foldValues step begin done =$= conduit'kw
       in
-          (dynSink sink'kv, dynDup sink'kv) `withName` fvOfAtom input
+          (dynConduit conduit'kv, dynDup conduit'kv) `withName` fvOfAtom input
   where
     withName v s = M.fromSet (const v) s
 
 ------------------------------------------------------------------------
 
 evalMapperTerm :: forall m n a. (Monad m, Typeable m, Show n, Ord n)
-               => Sink (Row Tag) m ()
-               -> Term n a
-               -> Map n (DynSink m, DynDup m)
-evalMapperTerm sink'row term = case term of
+               => Term n a
+               -> Map n (DynConduit m (Row Tag), DynDup m (Row Tag))
+evalMapperTerm term = case term of
     Return _ -> M.empty
 
     Write (MapperOutput tag :: Output b) (Var (Name n)) tm ->
@@ -413,48 +407,47 @@ evalMapperTerm sink'row term = case term of
           enc :: b -> Row Tag
           enc x = withTag tag (encodeKV x)
 
-          sink'b :: Sink b m ()
-          sink'b = C.map enc =$= sink'row
+          conduit'b :: Conduit b m (Row Tag)
+          conduit'b = C.map enc
 
-          sinks = evalMapperTerm sink'row tm
+          conduits'tm = evalMapperTerm tm
+          conduits'mo = M.singleton n (dynConduit conduit'b, dynDup conduit'b)
       in
-          M.insert n (dynSink sink'b, dynDup sink'b) sinks
+          M.unionWith dynJoin conduits'tm conduits'mo
 
     Write _ _ _ -> error "evalMapperTerm: found reducer output"
 
     Let (Name n) tl tm ->
       let
-          sinks'tm    = evalMapperTerm sink'row tm
-          (sink'n, _) = unsafeLookup "evalMapperTerm" n sinks'tm
-          sinks'tl    = evalTail sink'n tl
+          conduits'tm    = evalMapperTerm tm
+          (conduit'n, _) = unsafeLookup "evalMapperTerm" n conduits'tm
+          conduits'tl    = evalTail conduit'n tl
       in
-          M.unionWith dynJoin sinks'tm sinks'tl
+          M.unionWith dynJoin conduits'tm conduits'tl
 
 evalMapperTerm' :: forall m n a. (Monad m, Typeable m, Show n, Ord n)
                 => Term n a
-                -> Sink (Row Tag) m ()
-                -> Sink (Row ())  m ()
-evalMapperTerm' term sink'row = case term of
+                -> Conduit (Row ()) m (Row Tag)
+evalMapperTerm' term = case term of
     Let (Name n) (Read (_ :: Input b)) _ ->
       let
-          (dynSink, _) = unsafeLookup "evalMapperTerm'" n sinks
+          (dynConduit, _) = unsafeLookup "evalMapperTerm'" n conduits
 
-          sink'b :: Sink b m ()
-          sink'b =  fromDynSink "evalMapperTerm'" dynSink
+          conduit'b :: Conduit b m (Row Tag)
+          conduit'b =  fromDynConduit "evalMapperTerm'" dynConduit
       in
-          C.map decodeKV =$= sink'b
+          C.map decodeKV =$= conduit'b
   where
-    sinks = evalMapperTerm sink'row term
+    conduits = evalMapperTerm term
 
 ------------------------------------------------------------------------
 
 -- TODO evalReducerTerm is virtually the same as evalMapperTerm
 
 evalReducerTerm :: forall m n a. (Monad m, Typeable m, Show n, Ord n)
-                => Sink (Row FilePath) m ()
-                -> Term n a
-                -> Map n (DynSink m, DynDup m)
-evalReducerTerm sink'row term = case term of
+                => Term n a
+                -> Map n (DynConduit m (Row FilePath), DynDup m (Row FilePath))
+evalReducerTerm term = case term of
     Return _ -> M.empty
 
     Write (ReducerOutput path :: Output b) (Var (Name n)) tm ->
@@ -462,38 +455,38 @@ evalReducerTerm sink'row term = case term of
           enc :: b -> Row FilePath
           enc x = withTag path (encodeKV x)
 
-          sink'b :: Sink b m ()
-          sink'b = C.map enc =$= sink'row
+          conduit'b :: Conduit b m (Row FilePath)
+          conduit'b = C.map enc
 
-          sinks = evalReducerTerm sink'row tm
+          conduits'tm = evalReducerTerm tm
+          conduits'ro = M.singleton n (dynConduit conduit'b, dynDup conduit'b)
       in
-          M.insert n (dynSink sink'b, dynDup sink'b) sinks
+          M.unionWith dynJoin conduits'tm conduits'ro
 
     Write _ _ _ -> error "evalReducerTerm: found reducer output"
 
     Let (Name n) tl tm ->
       let
-          sinks'tm    = evalReducerTerm sink'row tm
-          (sink'n, _) = unsafeLookup "evalReducerTerm" n sinks'tm
-          sinks'tl    = evalTail sink'n tl
+          conduits'tm    = evalReducerTerm tm
+          (conduit'n, _) = unsafeLookup "evalReducerTerm" n conduits'tm
+          conduits'tl    = evalTail conduit'n tl
       in
-          M.unionWith dynJoin sinks'tm sinks'tl
+          M.unionWith dynJoin conduits'tm conduits'tl
 
 evalReducerTerm' :: forall m n a. (Monad m, Typeable m, Show n, Ord n)
                  => Term n a
-                 -> Sink (Row FilePath) m ()
-                 -> Sink (Row ())       m ()
-evalReducerTerm' term sink'row = case term of
+                 -> Conduit (Row ()) m (Row FilePath)
+evalReducerTerm' term = case term of
     Let (Name n) (Read (_ :: Input b)) _ ->
       let
-          (dynSink, _) = unsafeLookup "evalReducerTerm'" n sinks
+          (dynConduit, _) = unsafeLookup "evalReducerTerm'" n conduits
 
-          sink'b :: Sink b m ()
-          sink'b = fromDynSink "evalReducerTerm'" dynSink
+          conduit'b :: Conduit b m (Row FilePath)
+          conduit'b = fromDynConduit "evalReducerTerm'" dynConduit
       in
-          C.map decodeKV =$= sink'b
+          C.map decodeKV =$= conduit'b
   where
-    sinks = evalReducerTerm sink'row term
+    conduits = evalReducerTerm term
 
 ------------------------------------------------------------------------
 
@@ -557,6 +550,9 @@ bytesFormat = format (undefined :: B.ByteString)
 int32Format :: Format
 int32Format = format (undefined :: Int32)
 
+intFormat :: Format
+intFormat = format (undefined :: Int)
+
 testEncDecTagged = take 10 (decodeRows getWord8 schema (encodeRows putWord8 schema xs))
   where
     xs = cycle [ Row 67 "abcdefg" B.empty
@@ -576,4 +572,16 @@ sampleTextText = encodeUnitRows (textFormat :!: textFormat) rows
            , Row () "foo"     "quxx"
            , Row () "hello"   "world"
            , Row () "foo"     "baz"
+           ]
+
+sampleTextInt :: L.ByteString
+sampleTextInt = encodeUnitRows (textFormat :!: intFormat) rows
+  where
+    rows = [ Row () "hello"   "00000000"
+           , Row () "foo"     "00000001"
+           , Row () "foo"     "00000002"
+           , Row () "goodbye" "00000003"
+           , Row () "foo"     "00000004"
+           , Row () "hello"   "00000005"
+           , Row () "foo"     "00000006"
            ]
