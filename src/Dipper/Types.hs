@@ -263,14 +263,15 @@ data Tail n a where
     -- | GroupByKey from the FlumeJava paper.
     GroupByKey :: (Typeable n, Typeable k, Typeable v, Eq k, HadoopWritable k, HadoopWritable v)
                => Atom n (Pair k v)
-               -> Tail n (Pair k [v])
+               -> Tail n (Pair k v)
 
     -- | CombineValues from the FlumeJava paper.
-    FoldValues :: (Typeable n, Typeable k, Typeable v)
-               => (v -> v -> v)
-               -> v
-               -> Atom n (Pair k [v])
-               -> Tail n (Pair k v)
+    FoldValues :: (Typeable n, Typeable x, Typeable k, Typeable v, Typeable w, Eq k, Show x)
+               => (x -> v -> x)
+               -> (v -> x)
+               -> (x -> w)
+               -> Atom n (Pair k v)
+               -> Tail n (Pair k w)
 
   deriving (Typeable)
 
@@ -307,17 +308,19 @@ instance Show n => Show (Atom n a) where
 
 instance Show n => Show (Tail n a) where
   showsPrec p tl = showParen' p $ case tl of
-      Read          inp -> showString "Read "       . showForeign inp
-      Concat        xss -> showString "Concat "     . showForeign xss
-      ConcatMap   f  xs -> showString "ConcatMap "  . showForeign (typeOf f)
-                                                    . showString " "
-                                                    . showForeign xs
-      GroupByKey     xs -> showString "GroupByKey " . showForeign xs
-      FoldValues f x xs -> showString "FoldValues " . showForeign (typeOf f)
-                                                    . showString " "
-                                                    . showForeign (typeOf x)
-                                                    . showString " "
-                                                    . showForeign xs
+      Read            inp -> showString "Read "       . showForeign inp
+      Concat          xss -> showString "Concat "     . showForeign xss
+      ConcatMap     f  xs -> showString "ConcatMap "  . showForeign (typeOf f)
+                                                      . showString " "
+                                                      . showForeign xs
+      GroupByKey       xs -> showString "GroupByKey " . showForeign xs
+      FoldValues f b d xs -> showString "FoldValues " . showForeign (typeOf f)
+                                                      . showString " "
+                                                      . showForeign (typeOf b)
+                                                      . showString " "
+                                                      . showForeign (typeOf d)
+                                                      . showString " "
+                                                      . showForeign xs
 
 instance Show n => Show (Term n a) where
   showsPrec p x = showParen' p $ case x of

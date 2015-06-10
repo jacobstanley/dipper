@@ -48,13 +48,13 @@ example2 =
     Let i4     (Read input4) $
     Let gmap   (ConcatMap kv_add1 (Var i4)) $
     Let ggbk   (GroupByKey (Var gmap)) $
-    Let gcv    (FoldValues (+) 0 (Var ggbk)) $
+    Let gcv    (FoldValues (+) id id (Var ggbk)) $
     Let e      (ConcatMap untag (Var gcv)) $
     Let jtag3  (ConcatMap (tag 3) (Var e)) $
     Let jfltn  (Concat [Var jtag1, Var jtag2, Var jtag3]) $
     Let jgbk   (GroupByKey (Var jfltn)) $
     Let juntag (ConcatMap untag (Var jgbk)) $
-    Let f      (ConcatMap id (Var juntag)) $
+    Let f      (ConcatMap (:[]) (Var juntag)) $
     Let write2 (Concat [Var f]) $
     Write output2 (Var write2) $
     Return (Const [])
@@ -120,8 +120,10 @@ example3 =
     Let text1   (ConcatMap (\(k :!: v) -> [k :!: T.pack (show v)]) (Var concat1)) $
     Let gbk1    (GroupByKey (Var text1)) $
     Let gbk2    (GroupByKey (Var concat2)) $
-    Write output1 (Var gbk1) $
-    Write output2 (Var gbk2) $
+    Let mklist1 (FoldValues (flip (:)) return id (Var text1)) $
+    Let mklist2 (FoldValues (flip (:)) return id (Var concat2)) $
+    Write output1 (Var mklist1) $
+    Write output2 (Var mklist2) $
     Return (Const [])
   where
     input1  = MapperInput "in-1.csv" :: Input (Pair Text Int)
@@ -138,6 +140,8 @@ example3 =
     concat2 = "concat2"
     gbk1    = "gbk1"
     gbk2    = "gbk2"
+    mklist1 = "mklist1"
+    mklist2 = "mklist2"
 
 ------------------------------------------------------------------------
 
@@ -146,11 +150,11 @@ example4 =
     Let x0 (Read input) $
     Let x1 (ConcatMap (\(k :!: v) -> [k :!: T.toUpper v]) (Var x0)) $
     Let x2 (GroupByKey (Var x1)) $
-    Let x3 (FoldValues (\x y -> x <> ":" <> y) "" (Var x2)) $
+    Let x3 (FoldValues (\x y -> x <> ", " <> y) id id (Var x2)) $
     Write output (Var x3) $
     Return (Const [])
   where
-    input  = MapperInput   "input.csv"  :: Input (Pair Text Text)
+    input  = MapperInput   "input.csv"  :: Input  (Pair Text Text)
     output = ReducerOutput "output.csv" :: Output (Pair Text Text)
 
     x0 = "x0"

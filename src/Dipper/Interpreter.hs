@@ -13,7 +13,7 @@
 
 module Dipper.Interpreter where
 
-import           Control.Monad (mplus)
+import           Control.Monad (mplus, void, forever)
 import           Control.Monad.State (MonadState(..), modify, execState)
 import           Data.Binary.Get
 import           Data.Binary.Put
@@ -23,7 +23,7 @@ import qualified Data.ByteString.Lazy as L
 import           Data.Dynamic
 import           Data.Foldable (traverse_)
 import           Data.Int (Int32, Int64)
-import           Data.List (groupBy, foldl', sort, unfoldr, isSuffixOf)
+import           Data.List (foldl', sort, unfoldr, isSuffixOf)
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 import           Data.Maybe (maybeToList, mapMaybe)
@@ -37,10 +37,14 @@ import           Data.Word (Word8)
 
 import           Dipper.AST
 import           Dipper.Binary
-import           Dipper.Sink
 import           Dipper.Types
 
 import           Debug.Trace
+
+import           Data.Conduit ((=$=), ($$), yield)
+import           Data.Conduit (Source, Sink, Consumer, Producer, Conduit)
+import qualified Data.Conduit as C
+import qualified Data.Conduit.List as C
 
 ------------------------------------------------------------------------
 
@@ -54,8 +58,8 @@ data Step i o = Step {
   , stepOutputs :: [Formatted o]
   , stepTerm    :: Term Int ()
   , stepExec    :: (Monad m, Typeable m)
-                => Sink m (Row o)
-                -> Sink m (Row ())
+                => Sink (Row o) m ()
+                -> Sink (Row ()) m ()
   }
 
 type Mapper  = Step FilePath Tag
@@ -104,7 +108,7 @@ testPipeline p@Pipeline{..} files = foldl runStage files stages
       | otherwise = M.union fs
                   . createFiles
                   . runReducer
-                  . shuffle
+                  . sort
                   . concat
                   . M.elems
                   $ M.intersectionWith runMapper pMappers avail
@@ -129,36 +133,35 @@ testPipeline p@Pipeline{..} files = foldl runStage files stages
             path   = fName stepInput
             schema = fFormat stepInput
             irows  = decodeUnitRows schema bs
-            orows  = execState (pushMany sink irows) []
+            orows  = execState (C.sourceList irows $$ sink) []
             sink   = stepExec tagSink
-
-        -- TODO Detect correct target format
-        shuffle :: [Row Tag] -> [Row Tag]
-        shuffle = sort . map flatten . groupBy eq
-          where
-            eq (Row t0 k0 _) (Row t1 k1 _) = (t0, k0) == (t1, k1)
-
-            flatten rs@(Row t k _ : _) = Row t k (B.concat (map rowValue rs))
 
         runReducer :: [Row Tag] -> [Row FilePath]
         runReducer irows = traceShowId orows
           where
-            orows  = flip execState []
-                   . traverse_ (\row -> sinkOf (rowTag row) `push` withTag () row)
+            orows = execState (irows' $$ sink) []
+
+            irows' = C.sourceList
                    . traceShowId
                    . decodeTagRows schema
                    . encodeTagRows schema
                    $ irows
 
-            sinkOf tag = unsafeLookup "testPipeline.runReducer" tag sinks
-            sinks      = M.map (\r -> stepExec r fileSink)   pReducers
-            schema     = M.map (\r -> fFormat (stepInput r)) pReducers
+            sink = void
+                 . C.sequenceSinks
+                 . M.elems
+                 . M.mapWithKey (\tag r -> C.filter (hasTag tag)
+                                       =$= C.map (withTag ())
+                                       =$= stepExec r fileSink)
+                 $ pReducers
 
-    tagSink :: MonadState [Row Tag] m => Sink m (Row Tag)
-    tagSink = Sink (\x s -> modify (++[x]) >> return s) ()
+            schema = M.map (\r -> fFormat (stepInput r)) pReducers
 
-    fileSink :: MonadState [Row FilePath] m => Sink m (Row FilePath)
-    fileSink = Sink (\x s -> modify (++[x]) >> return s) ()
+    tagSink :: MonadState [Row Tag] m => Sink (Row Tag) m ()
+    tagSink = put =<< C.consume
+
+    fileSink :: MonadState [Row FilePath] m => Sink (Row FilePath) m ()
+    fileSink = put =<< C.consume
 
 ------------------------------------------------------------------------
 
@@ -296,7 +299,7 @@ outputTags msg = map go
 newtype DynSink (m :: * -> *) = DynSink Dynamic
     deriving (Show)
 
-dynSink :: (Typeable m, Typeable a) => Sink m a -> DynSink m
+dynSink :: (Typeable m, Typeable a) => Sink a m () -> DynSink m
 dynSink = DynSink . toDyn
 
 ------------------------------------------------------------------------
@@ -306,17 +309,46 @@ newtype DynDup m = DynDup (DynSink m -> DynSink m -> DynSink m)
 instance Show (DynDup m) where
     showsPrec p _ = showParen (p > 10) (showString "DynDup")
 
-fromDynSink :: (Typeable m, Typeable a) => String -> DynSink m -> Sink m a
+fromDynSink :: (Typeable m, Typeable a) => String -> DynSink m -> Sink a m ()
 fromDynSink msg (DynSink x) = unsafeFromDyn msg x
 
-dynDup :: forall m a. (Monad m, Typeable m, Typeable a) => Sink m a -> DynDup m
-dynDup _ = DynDup (\x y -> dynSink (dup (fromDynSink "dynDup" x :: Sink m a)
-                                        (fromDynSink "dynDup" y :: Sink m a)))
+dynDup :: forall m a. (Monad m, Typeable m, Typeable a) => Sink a m () -> DynDup m
+dynDup _ = DynDup (\x y -> dynSink (dup (fromDynSink "dynDup" x :: Sink a m ())
+                                        (fromDynSink "dynDup" y :: Sink a m ())))
 
 dynJoin :: (DynSink m, DynDup m)
         -> (DynSink m, DynDup m)
         -> (DynSink m, DynDup m)
 dynJoin (s0, DynDup d) (s1, _) = (d s0 s1, DynDup d)
+
+dup :: Monad m => Sink a m () -> Sink a m () -> Sink a m ()
+dup s1 s2 = C.sequenceSinks [s1, s2] >> return ()
+
+------------------------------------------------------------------------
+
+test'source :: Monad m => Source m (Row Tag)
+test'source = C.yield (Row 0 "" "")
+
+test'concatMap :: Monad m => (a -> [b]) -> Conduit a m b
+test'concatMap f = C.map f =$= C.concat
+
+test'foldValues :: forall m k v w x. (Monad m, Eq k)
+                => (x -> v -> x)
+                -> (v -> x)
+                -> (x -> w)
+                -> Conduit (Pair k v) m (Pair k w)
+test'foldValues step begin done = goM =$= C.catMaybes
+  where
+    goM = do
+        s <- C.mapAccum go Nothing
+        case s of
+          Nothing     -> yield Nothing
+          Just (k, x) -> yield (Just (k :!: done x))
+
+    go :: Pair k v -> Maybe (k, x) -> (Maybe (k, x), Maybe (Pair k w))
+    go (k :!: v) (Nothing)                  = (Just (k, begin v),  Nothing)
+    go (k :!: v) (Just (k0, x)) | k == k0   = (Just (k, step x v), Nothing)
+                                | otherwise = (Just (k, begin v),  Just (k0 :!: done x))
 
 ------------------------------------------------------------------------
 
@@ -329,130 +361,135 @@ evalTail :: forall m n a. (Monad m, Typeable m, Ord n)
 evalTail sink tl = case tl of
     Read _        -> M.empty
     GroupByKey _  -> error "evalTail: found GroupByKey"
-    Concat (xs :: [Atom n a]) ->
-      let
-          sink' :: Sink m a
-          sink' = fromDynSink "evalTail" sink
-      in
-          (dynSink sink', dynDup sink') `withName` fvOfAtoms xs
 
-    ConcatMap (f :: b -> [a]) x ->
+    Concat (input :: [Atom n a]) ->
       let
-          sink' :: Sink m b
-          sink' = unmap f (unconcat (fromDynSink "evalTail" sink))
+          sink'a :: Sink a m ()
+          sink'a = fromDynSink "evalTail" sink
       in
-          (dynSink sink', dynDup sink') `withName` fvOfAtom x
+          (dynSink sink'a, dynDup sink'a) `withName` fvOfAtoms input
 
-    FoldValues f v (x :: Atom n (Pair k [v])) ->
+    ConcatMap (f     :: b -> [a])
+              (input :: Atom n b) ->
       let
-          -- TODO although this works, we shouldn't really
-          -- TODO materialise the list of values just to
-          -- TODO fold over them.
-          g :: Pair k [v] -> Pair k v
-          g (k :!: vs) = k :!: foldl' f v vs
+          sink'a :: Sink a m ()
+          sink'a = fromDynSink "evalTail" sink
 
-          sink' :: Sink m (Pair k [v])
-          sink' = unmap g (fromDynSink "evalTail" sink)
+          sink'b :: Sink b m ()
+          sink'b = C.concatMap f =$= sink'a
       in
-          (dynSink sink', dynDup sink') `withName` fvOfAtom x
+          (dynSink sink'b, dynDup sink'b) `withName` fvOfAtom input
+
+    FoldValues (step  :: x -> v -> x)
+               (begin :: v -> x)
+               (done  :: x -> w)
+               (input :: Atom n (Pair k v)) ->
+      let
+          sink'kw :: Sink (Pair k w) m ()
+          sink'kw = fromDynSink "evalTail" sink
+
+          sink'kv :: Sink (Pair k v) m ()
+          sink'kv = test'foldValues step begin done =$= sink'kw
+      in
+          (dynSink sink'kv, dynDup sink'kv) `withName` fvOfAtom input
   where
     withName v s = M.fromSet (const v) s
 
 ------------------------------------------------------------------------
 
-evalMapperTerm :: (Monad m, Typeable m, Show n, Ord n)
-               => Sink m (Row Tag)
+evalMapperTerm :: forall m n a. (Monad m, Typeable m, Show n, Ord n)
+               => Sink (Row Tag) m ()
                -> Term n a
                -> Map n (DynSink m, DynDup m)
-evalMapperTerm sink term = case term of
+evalMapperTerm sink'row term = case term of
     Return _ -> M.empty
 
-    Write (MapperOutput tag :: Output a) (Var (Name n)) tm ->
+    Write (MapperOutput tag :: Output b) (Var (Name n)) tm ->
       let
-          enc :: a -> Row Tag
+          enc :: b -> Row Tag
           enc x = withTag tag (encodeKV x)
 
-          sink' = unmap enc sink
-          sinks = evalMapperTerm sink tm
+          sink'b :: Sink b m ()
+          sink'b = C.map enc =$= sink'row
+
+          sinks = evalMapperTerm sink'row tm
       in
-          M.insert n (dynSink sink', dynDup sink') sinks
+          M.insert n (dynSink sink'b, dynDup sink'b) sinks
 
     Write _ _ _ -> error "evalMapperTerm: found reducer output"
 
     Let (Name n) tl tm ->
       let
-          tm'sinks    = evalMapperTerm sink tm
-          (n'sink, _) = unsafeLookup "evalMapperTerm" n tm'sinks
-          tl'sinks    = evalTail n'sink tl
+          sinks'tm    = evalMapperTerm sink'row tm
+          (sink'n, _) = unsafeLookup "evalMapperTerm" n sinks'tm
+          sinks'tl    = evalTail sink'n tl
       in
-          M.unionWith dynJoin tm'sinks tl'sinks
+          M.unionWith dynJoin sinks'tm sinks'tl
 
 evalMapperTerm' :: forall m n a. (Monad m, Typeable m, Show n, Ord n)
                 => Term n a
-                -> Sink m (Row Tag)
-                -> Sink m (Row ())
-evalMapperTerm' term sink = case term of
+                -> Sink (Row Tag) m ()
+                -> Sink (Row ())  m ()
+evalMapperTerm' term sink'row = case term of
     Let (Name n) (Read (_ :: Input b)) _ ->
       let
           (dynSink, _) = unsafeLookup "evalMapperTerm'" n sinks
 
-          a'sink :: Sink m b
-          a'sink =  fromDynSink "evalMapperTerm'" dynSink
-
-          row'sink = unmap decodeKV a'sink
+          sink'b :: Sink b m ()
+          sink'b =  fromDynSink "evalMapperTerm'" dynSink
       in
-          row'sink
+          C.map decodeKV =$= sink'b
   where
-    sinks = evalMapperTerm sink term
+    sinks = evalMapperTerm sink'row term
 
 ------------------------------------------------------------------------
 
 -- TODO evalReducerTerm is virtually the same as evalMapperTerm
 
-evalReducerTerm :: (Monad m, Typeable m, Show n, Ord n)
-                => Sink m (Row FilePath)
+evalReducerTerm :: forall m n a. (Monad m, Typeable m, Show n, Ord n)
+                => Sink (Row FilePath) m ()
                 -> Term n a
                 -> Map n (DynSink m, DynDup m)
-evalReducerTerm sink term = case term of
+evalReducerTerm sink'row term = case term of
     Return _ -> M.empty
 
-    Write (ReducerOutput path :: Output a) (Var (Name n)) tm ->
+    Write (ReducerOutput path :: Output b) (Var (Name n)) tm ->
       let
-          enc :: a -> Row FilePath
+          enc :: b -> Row FilePath
           enc x = withTag path (encodeKV x)
 
-          sink' = unmap enc sink
-          sinks = evalReducerTerm sink tm
+          sink'b :: Sink b m ()
+          sink'b = C.map enc =$= sink'row
+
+          sinks = evalReducerTerm sink'row tm
       in
-          M.insert n (dynSink sink', dynDup sink') sinks
+          M.insert n (dynSink sink'b, dynDup sink'b) sinks
 
     Write _ _ _ -> error "evalReducerTerm: found reducer output"
 
     Let (Name n) tl tm ->
       let
-          tm'sinks    = evalReducerTerm sink tm
-          (n'sink, _) = unsafeLookup "evalReducerTerm" n tm'sinks
-          tl'sinks    = evalTail n'sink tl
+          sinks'tm    = evalReducerTerm sink'row tm
+          (sink'n, _) = unsafeLookup "evalReducerTerm" n sinks'tm
+          sinks'tl    = evalTail sink'n tl
       in
-          M.unionWith dynJoin tm'sinks tl'sinks
+          M.unionWith dynJoin sinks'tm sinks'tl
 
 evalReducerTerm' :: forall m n a. (Monad m, Typeable m, Show n, Ord n)
                  => Term n a
-                 -> Sink m (Row FilePath)
-                 -> Sink m (Row ())
-evalReducerTerm' term sink = case term of
-    Let (Name n) (Read (_ :: Input (Pair k [v]))) _ ->
+                 -> Sink (Row FilePath) m ()
+                 -> Sink (Row ())       m ()
+evalReducerTerm' term sink'row = case term of
+    Let (Name n) (Read (_ :: Input b)) _ ->
       let
           (dynSink, _) = unsafeLookup "evalReducerTerm'" n sinks
 
-          a'sink :: Sink m b
-          a'sink = fromDynSink "evalReducerTerm'" dynSink
-
-          row'sink = unmap decodeKV a'sink
+          sink'b :: Sink b m ()
+          sink'b = fromDynSink "evalReducerTerm'" dynSink
       in
-          row'sink
+          C.map decodeKV =$= sink'b
   where
-    sinks = evalReducerTerm sink term
+    sinks = evalReducerTerm sink'row term
 
 ------------------------------------------------------------------------
 
@@ -529,10 +566,10 @@ sampleTextText :: L.ByteString
 sampleTextText = encodeUnitRows (textFormat :!: textFormat) rows
   where
     rows = [ Row () "hello"   "hello"
-           , Row () "hello"   "world"
-           , Row () "goodbye" "goodbye"
            , Row () "foo"     "foo"
            , Row () "foo"     "bar"
-           , Row () "foo"     "baz"
+           , Row () "goodbye" "goodbye"
            , Row () "foo"     "quxx"
+           , Row () "hello"   "world"
+           , Row () "foo"     "baz"
            ]

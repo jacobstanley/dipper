@@ -34,11 +34,11 @@ renameTail :: (Ord a, Show a, Show b, Typeable b)
            -> Tail a r
            -> Tail b r
 renameTail names tl = case tl of
-    Read       i     -> Read       i
-    Concat        xs -> Concat         (map (renameAtom names) xs)
-    ConcatMap  f   x -> ConcatMap  f   (renameAtom names x)
-    GroupByKey     x -> GroupByKey     (renameAtom names x)
-    FoldValues f s x -> FoldValues f s (renameAtom names x)
+    Read       i       -> Read       i
+    Concat          xs -> Concat           (map (renameAtom names) xs)
+    ConcatMap  f     x -> ConcatMap  f     (renameAtom names x)
+    GroupByKey       x -> GroupByKey       (renameAtom names x)
+    FoldValues s b d x -> FoldValues s b d (renameAtom names x)
 
 renameTerm :: (Ord n, Show n, Show m, Typeable m)
            => [m]
@@ -96,11 +96,11 @@ substTail :: (Ord n, Show n)
           -> Tail n a
           -> Tail n a
 substTail subs tl = case tl of
-    Read         i   -> Read         i
-    Concat        xs -> Concat         (map (substAtom subs) xs)
-    ConcatMap  f   x -> ConcatMap  f   (substAtom subs x)
-    GroupByKey     x -> GroupByKey     (substAtom subs x)
-    FoldValues f s x -> FoldValues f s (substAtom subs x)
+    Read       i       -> Read       i
+    Concat          xs -> Concat           (map (substAtom subs) xs)
+    ConcatMap  f     x -> ConcatMap  f     (substAtom subs x)
+    GroupByKey       x -> GroupByKey       (substAtom subs x)
+    FoldValues s b d x -> FoldValues s b d (substAtom subs x)
 
 substTerm :: (Ord n, Show n)
           => Map n Dynamic -- Dynamic :: Atom n _
@@ -125,11 +125,11 @@ fvOfAtoms = S.unions . map fvOfAtom
 
 fvOfTail :: Ord n => Tail n a -> Set n
 fvOfTail tl = case tl of
-    Read          _   -> S.empty
-    Concat         xs -> fvOfAtoms xs
-    ConcatMap     _ x -> fvOfAtom x
-    GroupByKey      x -> fvOfAtom x
-    FoldValues  _ _ x -> fvOfAtom x
+    Read            _   -> S.empty
+    Concat           xs -> fvOfAtoms xs
+    ConcatMap       _ x -> fvOfAtom x
+    GroupByKey        x -> fvOfAtom x
+    FoldValues  _ _ _ x -> fvOfAtom x
 
 fvOfTerm :: Ord n => Term n a -> Set n
 fvOfTerm term = case term of
@@ -162,11 +162,11 @@ isAtomDependent ns atom = case atom of
 
 isTailDependent :: Ord n => ([Bool] -> Bool) -> Set n -> Tail n a -> Bool
 isTailDependent combine ns tl = case tl of
-    Read          _   -> False
-    Concat         xs -> combine (map (isAtomDependent ns) xs)
-    ConcatMap     _ x -> isAtomDependent ns x
-    GroupByKey      x -> isAtomDependent ns x
-    FoldValues  _ _ x -> isAtomDependent ns x
+    Read           _   -> False
+    Concat          xs -> combine (map (isAtomDependent ns) xs)
+    ConcatMap      _ x -> isAtomDependent ns x
+    GroupByKey       x -> isAtomDependent ns x
+    FoldValues _ _ _ x -> isAtomDependent ns x
 
 dependents :: forall a n. Ord n => ([Bool] -> Bool) -> Set n -> Term n a -> Set n
 dependents combine ns term = case term of
@@ -196,11 +196,11 @@ partialAtoms ns atoms = case mapMaybe (partialAtom ns) atoms of
 
 partialTail :: Ord n => Set n -> Tail n a -> Maybe (Tail n a)
 partialTail ns tl = case tl of
-    Read           _ -> Nothing
-    Concat        xs -> Concat         <$> partialAtoms ns xs
-    ConcatMap    f x -> ConcatMap  f   <$> partialAtom  ns x
-    GroupByKey     x -> GroupByKey     <$> partialAtom  ns x
-    FoldValues f v x -> FoldValues f v <$> partialAtom  ns x
+    Read             _ -> Nothing
+    Concat          xs -> Concat           <$> partialAtoms ns xs
+    ConcatMap      f x -> ConcatMap  f     <$> partialAtom  ns x
+    GroupByKey       x -> GroupByKey       <$> partialAtom  ns x
+    FoldValues s b d x -> FoldValues s b d <$> partialAtom  ns x
 
 partialTerm :: Ord n => Set n -> Term n a -> Term n ()
 partialTerm ns term = case term of
@@ -249,11 +249,11 @@ annotAtom ns atom = case atom of
 annotTail :: (Ord n, Show n, Show m, Typeable m)
           => Map n m -> Tail n a -> Tail m a
 annotTail ns tl = case tl of
-    Read          i   -> Read       i
-    Concat         xs -> Concat         (map (annotAtom ns) xs)
-    ConcatMap     g x -> ConcatMap  g   (annotAtom ns x)
-    GroupByKey      x -> GroupByKey     (annotAtom ns x)
-    FoldValues  g v x -> FoldValues g v (annotAtom ns x)
+    Read       i       -> Read       i
+    Concat          xs -> Concat           (map (annotAtom ns) xs)
+    ConcatMap  g     x -> ConcatMap  g     (annotAtom ns x)
+    GroupByKey       x -> GroupByKey       (annotAtom ns x)
+    FoldValues s b d x -> FoldValues s b d (annotAtom ns x)
 
 annotTerm :: (Ord n, Show n, Show m, Typeable m)
           => Map n m -> Term n a -> Term m a
@@ -295,11 +295,11 @@ inputsOfTail :: (Show n, Ord n)
              -> Tail n a
              -> Set (DistTo Input')
 inputsOfTail env tl = case tl of
-    Read          i   -> S.singleton (DistTo (fromInput i) 0)
-    Concat         xs -> S.unions (map (inputsOfAtom env) xs)
-    ConcatMap     _ x -> inputsOfAtom env x
-    GroupByKey      x -> inputsOfAtom env x
-    FoldValues  _ _ x -> inputsOfAtom env x
+    Read       i       -> S.singleton (DistTo (fromInput i) 0)
+    Concat          xs -> S.unions (map (inputsOfAtom env) xs)
+    ConcatMap  _     x -> inputsOfAtom env x
+    GroupByKey       x -> inputsOfAtom env x
+    FoldValues _ _ _ x -> inputsOfAtom env x
 
 inputsOfTerm :: (Show n, Ord n)
              => Map n (Set (DistTo Input'))
