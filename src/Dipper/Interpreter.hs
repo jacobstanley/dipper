@@ -325,29 +325,24 @@ dup c1 c2 = void (C.sequenceConduits [c1, c2])
 
 ------------------------------------------------------------------------
 
-test'source :: Monad m => Source m (Row Tag)
-test'source = C.yield (Row 0 "" "")
-
-test'concatMap :: Monad m => (a -> [b]) -> Conduit a m b
-test'concatMap f = C.map f =$= C.concat
-
-test'foldValues :: forall m k v w x. (Monad m, Eq k)
-                => (x -> v -> x)
-                -> (v -> x)
-                -> (x -> w)
-                -> Conduit (Pair k v) m (Pair k w)
-test'foldValues step begin done = goM =$= C.catMaybes
+foldValues :: forall m k v w x. (Monad m, Eq k)
+           => (x -> v -> x)
+           -> (v -> x)
+           -> (x -> w)
+           -> Conduit (Pair k v) m (Pair k w)
+foldValues step v2x x2w = goM =$= C.catMaybes
   where
+    goM :: Conduit (Pair k v) m (Maybe (Pair k w))
     goM = do
         s <- C.mapAccum go Nothing
         case s of
           Nothing     -> yield Nothing
-          Just (k, x) -> yield (Just (k :!: done x))
+          Just (k, x) -> yield (Just (k :!: x2w x))
 
     go :: Pair k v -> Maybe (k, x) -> (Maybe (k, x), Maybe (Pair k w))
-    go (k :!: v) (Nothing)                  = (Just (k, begin v),  Nothing)
+    go (k :!: v) (Nothing)                  = (Just (k, v2x v),    Nothing)
     go (k :!: v) (Just (k0, x)) | k == k0   = (Just (k, step x v), Nothing)
-                                | otherwise = (Just (k, begin v),  Just (k0 :!: done x))
+                                | otherwise = (Just (k, v2x v),    Just (k0 :!: x2w x))
 
 ------------------------------------------------------------------------
 
@@ -388,7 +383,7 @@ evalTail conduit tl = case tl of
           conduit'kw = fromDynConduit "evalTail" conduit
 
           conduit'kv :: Conduit (Pair k v) m o
-          conduit'kv = test'foldValues step begin done =$= conduit'kw
+          conduit'kv = foldValues step begin done =$= conduit'kw
       in
           (dynConduit conduit'kv, dynDup conduit'kv) `withName` fvOfAtom input
   where
@@ -510,13 +505,13 @@ encodeTagRows = encodeRows putWord8
 
 ------------------------------------------------------------------------
 
+-- TODO this is unlikely to have good performance
 decodeRows :: (Show a, Ord a) => Get a -> Map a KVFormat -> L.ByteString -> [Row a]
-decodeRows getTag schema bs =
-    -- TODO this is unlikely to have good performance
-    case runGetOrFail (getRow getTag schema) bs of
-        Left  (_,   _, err)            -> error ("decodeRows: " ++ err)
-        Right (bs', o, x) | L.null bs' -> [x]
-                          | otherwise  -> x : decodeRows getTag schema bs'
+decodeRows getTag schema bs
+    | L.null bs = []
+    | otherwise = case runGetOrFail (getRow getTag schema) bs of
+        Left  (_,   _, err) -> error ("decodeRows: " ++ err)
+        Right (bs', o, x)   -> x : decodeRows getTag schema bs'
 
 encodeRows :: (Show a, Ord a) => (a -> Put) -> Map a KVFormat -> [Row a] -> L.ByteString
 encodeRows putTag schema = runPut . mapM_ (putRow putTag schema)
