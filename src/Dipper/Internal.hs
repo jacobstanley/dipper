@@ -5,22 +5,24 @@
 
 module Dipper.Internal where
 
+import           Control.Concurrent.Async (Concurrently (..))
 import           Data.Binary.Get
 import           Data.Binary.Put
-import qualified Data.ByteString.Char8 as S
+import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy.Char8 as L
+import           Data.Conduit
+import           Data.Conduit.Binary (sourceHandle)
+import qualified Data.Conduit.List as CL
+import           Data.Conduit.Process (ClosedStream(..), proc)
+import           Data.Conduit.Process (streamingProcess, waitForStreamingProcess)
+import qualified Data.Conduit.Text as CT
 import           Data.Monoid ((<>))
 import qualified Data.Text as T
+import qualified Data.Text.IO as T
 import           System.Environment (getExecutablePath)
 import           System.Exit (ExitCode)
 import           System.FilePath (takeFileName)
-
-import           Control.Lens (view)
-import           Pipes
-import           Pipes.Group (groupsBy, folds)
-import qualified Pipes.Prelude as P
-import qualified Pipes.Text.IO as PT
-import           System.Process.Streaming hiding (env)
+import           System.IO (Handle, BufferMode(..), hSetBuffering)
 
 import           Dipper.Binary
 
@@ -48,17 +50,23 @@ runJob hadoopEnv dipperJarPath = do
     putStrLn "Arguments:"
     mapM_ putStrLn (mkArgs self)
 
-    (code, _) <- execute (pipeoec stdout stderr (fromConsumer PT.stdout))
-                         (program self)
-    return code
+    (ClosedStream, ClosedStream, stderr, h) <-
+        streamingProcess (program self)
+
+    runConcurrently
+        -- $ Concurrently (output stdout "stdout")
+        $ Concurrently (output stderr "stderr")
+        *> Concurrently (waitForStreamingProcess h)
   where
-    linesUtf8 = toLines decodeUtf8 (pure id)
-    stdout    = tweakLines (yield "stdout> " *>) linesUtf8
-    stderr    = tweakLines (yield "stderr> " *>) linesUtf8
+    output :: Handle -> T.Text -> IO ()
+    output src name = do
+        hSetBuffering src NoBuffering
+        runConduit $ sourceHandle src
+                 =$= CT.decodeUtf8
+                 =$= CT.lines
+                 =$= CL.mapM_ (\xs -> T.putStrLn (name <> "> " <> xs))
 
-    program self = proc (hadoopExec hadoopEnv)
-                        (mkArgs self)
-
+    program self = proc (hadoopExec hadoopEnv) (mkArgs self)
     mkArgs  self =
         [ "jar", streamingJar hadoopEnv
         , "-files", self
@@ -96,18 +104,18 @@ runJob hadoopEnv dipperJarPath = do
 mapper :: IO ()
 mapper = L.interact (writeKVs . readKVs)
 
-writeKVs :: [(T.Text, S.ByteString)] -> L.ByteString
+writeKVs :: [(T.Text, B.ByteString)] -> L.ByteString
 writeKVs = L.concat . map (runPut . putKV)
   where
     putKV (k, v) = do
       putText k
-      putBytesWritable (S.pack (show (S.length v)))
+      putBytesWritable (B.pack (show (B.length v)))
 
-readKVs :: L.ByteString -> [(T.Text, S.ByteString)]
+readKVs :: L.ByteString -> [(T.Text, B.ByteString)]
 readKVs bs | L.null bs = []
            | otherwise = case runGetOrFail getKV bs of
                Left  (_,   _, err)    -> error ("readKVs: " ++ err)
                Right (bs', _, (k, v)) -> (k, v) : readKVs bs'
 
-getKV :: Get (T.Text, S.ByteString)
+getKV :: Get (T.Text, B.ByteString)
 getKV = (,) <$> getText <*> getBytesWritable
