@@ -111,26 +111,3 @@ readKVs bs | L.null bs = []
 
 getKV :: Get (T.Text, S.ByteString)
 getKV = (,) <$> getText <*> getBytesWritable
-
-------------------------------------------------------------------------
-
-type Key = Int
-type Val = Int
-
-testValues :: Monad m => Producer (Key, Val) m ()
-testValues = each [ (1,1), (1,2), (1,3)
-                  , (2,1)
-                  , (3,1), (3,2), (3,3), (3,4)
-                  ]
-
-foldValues :: (Monad m, Eq k)
-           => (v -> v -> v)
-           -> Producer (k, v) m r
-           -> Producer (k, v) m r
-foldValues append xs =
-    P.concat <-< folds step Nothing id (view (groupsBy keyEq) xs)
-  where
-    keyEq (k, _) (k', _) = k == k'
-
-    step (Nothing)      (k, v) = Just (k, v)
-    step (Just (_, v0)) (k, v) = Just (k, v0 `append` v)
