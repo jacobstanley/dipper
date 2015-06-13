@@ -15,9 +15,9 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as L
 import           Data.Int (Int32, Int64)
 import           Data.String (IsString(..))
-import           Data.Tuple.Strict (Pair(..))
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
+import           Data.Tuple.Strict (Pair(..))
 import           Data.Typeable (Typeable, typeOf)
 import           Data.Word (Word8)
 
@@ -65,11 +65,28 @@ data ByteLayout =
   deriving (Eq, Ord, Show)
 
 data Format = Format {
-    fmtType   :: !HadoopType
-  , fmtLayout :: !ByteLayout
-  } deriving (Eq, Ord, Show)
+    fmtType    :: !HadoopType
+  , fmtLayout  :: !ByteLayout
+  , fmtCompare :: B.ByteString -> B.ByteString -> Ordering
+  }
 
 type KVFormat = Pair Format Format
+
+------------------------------------------------------------------------
+
+instance Eq Format where
+    (Format t1 l1 _) == (Format t2 l2 _) = t1 == t2 && l1 == l2
+
+instance Ord Format where
+    compare (Format t1 l1 _) (Format t2 l2 _) = compare (t1, l1) (t2, l2)
+
+instance Show Format where
+    showsPrec p (Format typ lay _) =
+        showParen (p > 10) $ showString "Format "
+                           . showsPrec 11 typ
+                           . showString " "
+                           . showsPrec 11 lay
+                           . showString " {..}"
 
 ------------------------------------------------------------------------
 
@@ -116,11 +133,13 @@ instance {-# OVERLAPPING #-} (HadoopWritable k, HadoopWritable v) => KV (Pair k 
 
 format :: forall a. HadoopWritable a => a -> Format
 format _ = Format (hadoopType (undefined :: a))
-                  (byteLayout (undefined :: a))
+                  (byteLayout (undefined :: a)) decodeCompare
+  where
+    decodeCompare x y = compare (decode x :: a) (decode y :: a)
 
 -- | Implementations should match `org.apache.hadoop.io.HadoopWritable` where
 -- possible.
-class HadoopWritable a where
+class Ord a => HadoopWritable a where
     -- | Gets the package qualified name of 'a' in Java/Hadoop land. Does
     -- not inspect the value of 'a', simply uses it for type information.
     hadoopType :: a -> HadoopType
@@ -266,12 +285,10 @@ data Tail n a where
                -> Tail n (Pair k v)
 
     -- | CombineValues from the FlumeJava paper.
-    FoldValues :: (Typeable n, Typeable x, Typeable k, Typeable v, Typeable w, Eq k, Show x, Show k, Show v, Show w)
-               => (x -> v -> x)
-               -> (v -> x)
-               -> (x -> w)
+    FoldValues :: (Typeable n, Typeable k, Typeable v, Eq k, Show k, Show v)
+               => (v -> v -> v)
                -> Atom n (Pair k v)
-               -> Tail n (Pair k w)
+               -> Tail n (Pair k v)
 
   deriving (Typeable)
 
@@ -308,19 +325,15 @@ instance Show n => Show (Atom n a) where
 
 instance Show n => Show (Tail n a) where
   showsPrec p tl = showParen' p $ case tl of
-      Read            inp -> showString "Read "       . showForeign inp
-      Concat          xss -> showString "Concat "     . showForeign xss
-      ConcatMap     f  xs -> showString "ConcatMap "  . showForeign (typeOf f)
-                                                      . showString " "
-                                                      . showForeign xs
-      GroupByKey       xs -> showString "GroupByKey " . showForeign xs
-      FoldValues f b d xs -> showString "FoldValues " . showForeign (typeOf f)
-                                                      . showString " "
-                                                      . showForeign (typeOf b)
-                                                      . showString " "
-                                                      . showForeign (typeOf d)
-                                                      . showString " "
-                                                      . showForeign xs
+      Read         inp -> showString "Read "       . showForeign inp
+      Concat       xss -> showString "Concat "     . showForeign xss
+      ConcatMap  f  xs -> showString "ConcatMap "  . showForeign (typeOf f)
+                                                   . showString " "
+                                                   . showForeign xs
+      GroupByKey    xs -> showString "GroupByKey " . showForeign xs
+      FoldValues f  xs -> showString "FoldValues " . showForeign (typeOf f)
+                                                   . showString " "
+                                                   . showForeign xs
 
 instance Show n => Show (Term n a) where
   showsPrec p x = showParen' p $ case x of

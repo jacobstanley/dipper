@@ -24,10 +24,11 @@ import qualified Data.ByteString.Lazy as L
 import           Data.Dynamic
 import           Data.Foldable (traverse_)
 import           Data.Int (Int32, Int64)
-import           Data.List (foldl', sort, unfoldr, isSuffixOf)
+import           Data.List (foldl', sort, sortBy, unfoldr, isSuffixOf)
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 import           Data.Maybe (maybeToList, mapMaybe)
+import           Data.Ord (Ordering(..))
 import           Data.Set (Set)
 import qualified Data.Set as S
 import qualified Data.Text as T
@@ -107,7 +108,7 @@ testPipeline p@Pipeline{..} files = foldl runStage files stages
       | otherwise = M.union fs
                   . createFiles
                   . runReducer
-                  . sort
+                  . shuffle
                   . concat
                   . M.elems
                   $ M.intersectionWith runMapper pMappers avail
@@ -155,7 +156,19 @@ testPipeline p@Pipeline{..} files = foldl runStage files stages
                                        =$= fileSink )
                  $ pReducers
 
-            schema = M.map (\r -> fFormat (stepInput r)) pReducers
+    shuffle :: [Row Tag] -> [Row Tag]
+    shuffle = sortBy tagKeyCompare
+
+    tagKeyCompare :: Row Tag -> Row Tag -> Ordering
+    tagKeyCompare (Row t1 k1 _) (Row t2 k2 _) =
+        case compare t1 t2 of
+            EQ  -> fmtCompare kFmt k1 k2
+            ord -> ord
+      where
+        (kFmt :!: _) = unsafeLookup "testPipeline.tagKeyCompare" t1 schema
+
+    schema :: Map Tag KVFormat
+    schema = M.map (\r -> fFormat (stepInput r)) pReducers
 
     fileSink :: Sink (Row FilePath) Identity [Row FilePath]
     fileSink = C.consume
@@ -325,24 +338,22 @@ dup c1 c2 = void (C.sequenceConduits [c1, c2])
 
 ------------------------------------------------------------------------
 
-foldValues :: forall m k v w x. (Monad m, Eq k)
-           => (x -> v -> x)
-           -> (v -> x)
-           -> (x -> w)
-           -> Conduit (Pair k v) m (Pair k w)
-foldValues step v2x x2w = goM =$= C.catMaybes
+foldValues :: forall m k v. (Monad m, Eq k)
+           => (v -> v -> v)
+           -> Conduit (Pair k v) m (Pair k v)
+foldValues append = goM =$= C.catMaybes
   where
-    goM :: Conduit (Pair k v) m (Maybe (Pair k w))
+    goM :: Conduit (Pair k v) m (Maybe (Pair k v))
     goM = do
         s <- C.mapAccum go Nothing
         case s of
           Nothing     -> yield Nothing
-          Just (k, x) -> yield (Just (k :!: x2w x))
+          Just (k, v) -> yield (Just (k :!: v))
 
-    go :: Pair k v -> Maybe (k, x) -> (Maybe (k, x), Maybe (Pair k w))
-    go (k :!: v) (Nothing)                  = (Just (k, v2x v),    Nothing)
-    go (k :!: v) (Just (k0, x)) | k == k0   = (Just (k, step x v), Nothing)
-                                | otherwise = (Just (k, v2x v),    Just (k0 :!: x2w x))
+    go :: Pair k v -> Maybe (k, v) -> (Maybe (k, v), Maybe (Pair k v))
+    go (k :!: v) (Nothing)                   = (Just (k, v),              Nothing)
+    go (k :!: v) (Just (k0, v0)) | k == k0   = (Just (k0, v0 `append` v), Nothing)
+                                 | otherwise = (Just (k, v),              Just (k0 :!: v0))
 
 ------------------------------------------------------------------------
 
@@ -374,18 +385,16 @@ evalTail conduit tl = case tl of
       in
           (dynConduit conduit'b, dynDup conduit'b) `withName` fvOfAtom input
 
-    FoldValues (step  :: x -> v -> x)
-               (begin :: v -> x)
-               (done  :: x -> w)
+    FoldValues (step  :: v -> v -> v)
                (input :: Atom n (Pair k v)) ->
       let
-          conduit'kw :: Conduit (Pair k w) m o
-          conduit'kw = fromDynConduit "evalTail" conduit
+          conduit'kv'o :: Conduit (Pair k v) m o
+          conduit'kv'o = fromDynConduit "evalTail" conduit
 
-          conduit'kv :: Conduit (Pair k v) m o
-          conduit'kv = foldValues step begin done =$= conduit'kw
+          conduit'kv'i :: Conduit (Pair k v) m o
+          conduit'kv'i = foldValues step =$= conduit'kv'o
       in
-          (dynConduit conduit'kv, dynDup conduit'kv) `withName` fvOfAtom input
+          (dynConduit conduit'kv'i, dynDup conduit'kv'i) `withName` fvOfAtom input
   where
     withName v s = M.fromSet (const v) s
 

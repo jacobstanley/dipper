@@ -48,7 +48,7 @@ example2 =
     Let i4     (Read input4) $
     Let gmap   (ConcatMap kv_add1 (Var i4)) $
     Let ggbk   (GroupByKey (Var gmap)) $
-    Let gcv    (FoldValues (+) id id (Var ggbk)) $
+    Let gcv    (FoldValues (+) (Var ggbk)) $
     Let e      (ConcatMap untag (Var gcv)) $
     Let jtag3  (ConcatMap (tag 3) (Var e)) $
     Let jfltn  (Concat [Var jtag1, Var jtag2, Var jtag3]) $
@@ -112,18 +112,20 @@ example2 =
 
 example3 :: Term String ()
 example3 =
-    Let i1      (Read input1) $
-    Let i2      (Read input2) $
-    Let i3      (Read input3) $
-    Let concat1 (Concat [Var i1, Var i2]) $
-    Let concat2 (Concat [Var i2, Var i3]) $
-    Let text1   (ConcatMap (\(k :!: v) -> [k :!: T.pack (show v)]) (Var concat1)) $
-    Let gbk1    (GroupByKey (Var text1)) $
-    Let gbk2    (GroupByKey (Var concat2)) $
-    Let mklist1 (FoldValues (flip (:)) return id (Var gbk1)) $
-    Let mklist2 (FoldValues (flip (:)) return id (Var gbk2)) $
-    Write output1 (Var mklist1) $
-    Write output2 (Var mklist2) $
+    Let i1        (Read input1) $
+    Let i2        (Read input2) $
+    Let i3        (Read input3) $
+    Let concat1   (Concat [Var i1, Var i2]) $
+    Let concat2   (Concat [Var i2, Var i3]) $
+    Let text1     (ConcatMap (\(k :!: v) -> [k :!: T.pack (show v)]) (Var concat1)) $
+    Let gbk1      (GroupByKey (Var text1)) $
+    Let gbk2      (GroupByKey (Var concat2)) $
+    Let mklist1   (ConcatMap (\(k :!: v) -> [k :!: [v]]) (Var gbk1)) $
+    Let mklist2   (ConcatMap (\(k :!: v) -> [k :!: [v]]) (Var gbk2)) $
+    Let foldlist1 (FoldValues (++) (Var mklist1)) $
+    Let foldlist2 (FoldValues (++) (Var mklist2)) $
+    Write output1 (Var foldlist1) $
+    Write output2 (Var foldlist2) $
     Return (Const [])
   where
     input1  = MapperInput "in-1.csv" :: Input (Pair Text Int)
@@ -132,16 +134,18 @@ example3 =
     output1 = ReducerOutput "out-1.csv" :: Output (Pair Text [Text])
     output2 = ReducerOutput "out-2.csv" :: Output (Pair Text [Int])
 
-    i1      = "input1"
-    i2      = "input2"
-    i3      = "input3"
-    text1   = "text1"
-    concat1 = "concat1"
-    concat2 = "concat2"
-    gbk1    = "gbk1"
-    gbk2    = "gbk2"
-    mklist1 = "mklist1"
-    mklist2 = "mklist2"
+    i1        = "input1"
+    i2        = "input2"
+    i3        = "input3"
+    text1     = "text1"
+    concat1   = "concat1"
+    concat2   = "concat2"
+    gbk1      = "gbk1"
+    gbk2      = "gbk2"
+    mklist1   = "mklist1"
+    mklist2   = "mklist2"
+    foldlist1 = "foldlist1"
+    foldlist2 = "foldlist2"
 
 ------------------------------------------------------------------------
 
@@ -151,12 +155,14 @@ example4 =
     Let x1 (ConcatMap (\(k :!: v) -> [k :!: T.toUpper v]) (Var x0)) $
     Let x2 (GroupByKey (Var x1)) $
     Write output3 (Var x2) $
-    Let x3 (FoldValues (\x y -> x <> ", " <> y) id id (Var x2)) $
+    Let x3 (FoldValues (\x y -> x <> ", " <> y) (Var x2)) $
     Let x4 (GroupByKey (Var x3)) $
-    Let x5 (FoldValues (\x _ -> x + 1 :: Int) (const 1) (T.pack . show) (Var x2)) $
-    Let x6 (GroupByKey (Var x5)) $
+    Let x5 (ConcatMap (\(k :!: _) -> [k :!: (1 :: Int)]) (Var x2)) $
+    Let x6 (FoldValues (+) (Var x5)) $
+    Let x7 (ConcatMap (\(k :!: v) -> [k :!: T.pack (show v)]) (Var x6)) $
+    Let x8 (GroupByKey (Var x7)) $
     Write output1 (Var x4) $
-    Write output2 (Var x6) $
+    Write output2 (Var x8) $
     Return (Const [])
   where
     input   = MapperInput   "input.csv"   :: Input  (Pair Text Text)
@@ -171,3 +177,5 @@ example4 =
     x4 = "x4"
     x5 = "x5"
     x6 = "x6"
+    x7 = "x7"
+    x8 = "x8"
