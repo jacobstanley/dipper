@@ -69,6 +69,34 @@ prop_group_fold (xs :: [Pair Int Int]) =
 
 ------------------------------------------------------------------------
 
+prop_two_outputs (xs :: [Int]) =
+    sort (filter even xs) === sort evens .&&.
+    sort (filter odd  xs) === sort odds
+  where
+    fs  = M.singleton "xs.in" (encodeList xs)
+    fs' = testPipeline (mkPipeline term) fs
+
+    evens = decodeList (unsafeLookup "prop_two_outputs" "evens.out" fs')
+    odds  = decodeList (unsafeLookup "prop_two_outputs" "odds.out"  fs')
+
+    term :: Term String ()
+    term = Let xs'    (Read xs'in) $
+           Let evens' (ConcatMap (\x -> if even x then [x] else []) (Var xs')) $
+           Let odds'  (ConcatMap (\x -> if odd  x then [x] else []) (Var xs')) $
+           Write evens'out (Var evens') $
+           Write odds'out  (Var odds') $
+           Return (Const [])
+
+    xs'in     = MapperInput   "xs.in"     :: Input  Int
+    evens'out = ReducerOutput "evens.out" :: Output Int
+    odds'out  = ReducerOutput "odds.out"  :: Output Int
+
+    xs'    = "xs"
+    evens' = "evens"
+    odds'  = "odds"
+
+------------------------------------------------------------------------
+
 groupByKey :: Ord k => [Pair k v] -> [Pair k v]
 groupByKey = sortBy keyCompare
   where
@@ -120,5 +148,5 @@ return []
 main :: IO ()
 main = do
     ok <- $(quickCheckAll)
-    --let ok = False
+    --let ok = error "switch TH back on"
     when (not ok) exitFailure
