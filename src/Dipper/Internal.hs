@@ -13,8 +13,6 @@ import qualified Data.ByteString.Lazy.Char8 as L
 import           Data.Conduit
 import           Data.Conduit.Binary (sourceHandle)
 import qualified Data.Conduit.List as CL
-import           Data.Conduit.Process (ClosedStream(..), proc)
-import           Data.Conduit.Process (streamingProcess, waitForStreamingProcess)
 import qualified Data.Conduit.Text as CT
 import           Data.Monoid ((<>))
 import qualified Data.Text as T
@@ -22,7 +20,9 @@ import qualified Data.Text.IO as T
 import           System.Environment (getExecutablePath)
 import           System.Exit (ExitCode)
 import           System.FilePath (takeFileName)
-import           System.IO (Handle, BufferMode(..), hSetBuffering)
+import           System.IO (Handle)
+import           System.Process (StdStream(..), CreateProcess(..))
+import           System.Process (proc, createProcess, waitForProcess)
 
 import           Dipper.Binary
 
@@ -50,17 +50,18 @@ runJob hadoopEnv dipperJarPath = do
     putStrLn "Arguments:"
     mapM_ putStrLn (mkArgs self)
 
-    (ClosedStream, ClosedStream, stderr, h) <-
-        streamingProcess (program self)
+    (Nothing, Just stdout, Just stderr, h) <-
+        createProcess (program self) { std_out = CreatePipe
+                                     , std_err = CreatePipe }
 
     runConcurrently
-        -- $ Concurrently (output stdout "stdout")
-        $ Concurrently (output stderr "stderr")
-        *> Concurrently (waitForStreamingProcess h)
+         $ Concurrently (output stdout "stdout")
+        *> Concurrently (output stderr "stderr")
+
+    waitForProcess h
   where
     output :: Handle -> T.Text -> IO ()
     output src name = do
-        hSetBuffering src NoBuffering
         runConduit $ sourceHandle src
                  =$= CT.decodeUtf8
                  =$= CT.lines
