@@ -1,6 +1,7 @@
 module Dipper (
       HadoopEnv(..)
     , dipperMain
+    , cloudera
     ) where
 
 import           Control.Exception (bracket, catch)
