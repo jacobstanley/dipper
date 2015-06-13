@@ -97,6 +97,31 @@ prop_two_outputs (xs :: [Int]) =
 
 ------------------------------------------------------------------------
 
+prop_two_inputs (xs :: [Int], ys :: [Int]) =
+    sort (xs ++ ys) === sort zs
+  where
+    fs' = testPipeline (mkPipeline term) fs
+    fs  = M.fromList [ ("xs.in", encodeList xs)
+                     , ("ys.in", encodeList ys) ]
+
+    zs = decodeList (unsafeLookup "prop_map" "zs.out" fs')
+
+    term :: Term String ()
+    term = Let xs' (Read xs'in) $
+           Let ys' (Read ys'in) $
+           Let zs' (Concat [Var xs', Var ys']) $
+           Write zs'out (Var zs') $
+           Return (Const [])
+
+    xs'in  = MapperInput   "xs.in"  :: Input  Int
+    ys'in  = MapperInput   "ys.in"  :: Input  Int
+    zs'out = ReducerOutput "zs.out" :: Output Int
+    xs' = "xs"
+    ys' = "ys"
+    zs' = "zs"
+
+------------------------------------------------------------------------
+
 groupByKey :: Ord k => [Pair k v] -> [Pair k v]
 groupByKey = sortBy keyCompare
   where
