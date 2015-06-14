@@ -34,9 +34,24 @@ public class ValueWritable implements Writable {
     public void readFields(DataInput in) throws IOException {
         if (value != null) {
             value.readFields(in);
+
             //System.err.printf("ValueWritable: read: %s (%s)\n",
             //        value.toString(), value.getClass().getSimpleName());
         } else {
+            // This case occurs when we are a reducer input, reading
+            // from the mapper output. We can't know at this point what
+            // the type of the value is, and we don't really care. The
+            // dipper process already knows how to decode the bytes as
+            // it will have received the identifier tag prior to
+            // receiving this value. The best thing for us to do is just
+            // pass the bytes on untouched.
+
+            // For efficiency and in order to easily capture the length
+            // of the available bytes, we assume that the DataInput is a
+            // DataInputBuffer and pull out its buffer directly. This
+            // might stop working at some point, and we'll just have to
+            // cross that bridge when we come to it.
+
             final DataInputBuffer src = (DataInputBuffer)in;
 
             final int    pos  = src.getPosition();
@@ -59,10 +74,12 @@ public class ValueWritable implements Writable {
         if (value != null) {
             //System.err.printf("ValueWritable: write: %s (%s)\n",
             //        value.toString(), value.getClass().getSimpleName());
+
             value.write(out);
         } else {
             //System.err.printf("ValueWritable: write: len = %d, data = %s\n",
             //        bufferUsed, toHex(buffer));
+
             out.write(buffer, 0, bufferUsed);
         }
     }

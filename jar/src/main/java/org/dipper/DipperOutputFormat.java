@@ -2,16 +2,16 @@ package org.dipper;
 
 import java.io.IOException;
 import java.util.Iterator;
-import java.util.TreeMap;
+import java.util.HashMap;
 
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.mapred.FileOutputFormat;
 import org.apache.hadoop.mapred.JobConf;
+import org.apache.hadoop.mapred.OutputFormat;
 import org.apache.hadoop.mapred.RecordWriter;
 import org.apache.hadoop.mapred.Reporter;
-import org.apache.hadoop.mapred.SequenceFileOutputFormat;
 import org.apache.hadoop.util.Progressable;
 
 ////////////////////////////////////////////////////////////////////////
@@ -33,7 +33,7 @@ class DipperRecordWriter implements RecordWriter<TagKeyWritable, ValueWritable> 
     private final Progressable progress;
 
     private final DipperConf conf;
-    private final TreeMap<Integer, RecordWriter<Writable, Writable>> writers;
+    private final HashMap<Integer, RecordWriter<Writable, Writable>> writers;
 
     public DipperRecordWriter(FileSystem fs, JobConf job, String name, Progressable progress) {
         this.fs       = fs;
@@ -41,7 +41,7 @@ class DipperRecordWriter implements RecordWriter<TagKeyWritable, ValueWritable> 
         this.partName = name;
         this.progress = progress;
         this.conf     = new DipperConf(job);
-        this.writers  = new TreeMap<Integer, RecordWriter<Writable, Writable>>();
+        this.writers  = new HashMap<Integer, RecordWriter<Writable, Writable>>();
     }
 
     public void write(TagKeyWritable k, ValueWritable v) throws IOException {
@@ -56,11 +56,7 @@ class DipperRecordWriter implements RecordWriter<TagKeyWritable, ValueWritable> 
         RecordWriter<Writable, Writable> writer = writers.get(tag);
 
         if (writer == null) {
-            Class<?> keyClass   = conf.keyClassOf(tag);
-            Class<?> valueClass = conf.valueClassOf(tag);
-            String   path       = conf.pathOf(tag) + "/" + partName;
-
-            writer = getSequenceFileWriter(fs, job, path, progress, keyClass, valueClass);
+            writer = createWriterOf(tag);
             writers.put(tag, writer);
         }
 
@@ -79,19 +75,13 @@ class DipperRecordWriter implements RecordWriter<TagKeyWritable, ValueWritable> 
 
     ////////////////////////////////////////////////////////////////////
 
-    private SequenceFileOutputFormat<Writable, Writable> sequenceFormat = null;
+    private RecordWriter<Writable, Writable> createWriterOf(int tag) throws IOException {
 
-    protected RecordWriter<Writable, Writable> getSequenceFileWriter(
-            FileSystem fs,
-            JobConf job,
-            String name,
-            Progressable progress,
-            Class<?> keyClass,
-            Class<?> valueClass) throws IOException {
+        OutputFormat<Writable, Writable> format = conf.newFormatOf(tag);
 
-        if (sequenceFormat == null) {
-            sequenceFormat = new SequenceFileOutputFormat<Writable, Writable>();
-        }
+        Class<?> keyClass   = conf.keyClassOf(tag);
+        Class<?> valueClass = conf.valueClassOf(tag);
+        String   path       = conf.pathOf(tag) + "/" + partName;
 
         Class<?> oldKeyClass   = job.getOutputKeyClass();
         Class<?> oldValueClass = job.getOutputValueClass();
@@ -99,7 +89,8 @@ class DipperRecordWriter implements RecordWriter<TagKeyWritable, ValueWritable> 
         try {
             job.setOutputKeyClass(keyClass);
             job.setOutputValueClass(valueClass);
-            return sequenceFormat.getRecordWriter(fs, job, name, progress);
+
+            return format.getRecordWriter(fs, job, path, progress);
         } finally {
             job.setOutputKeyClass(oldKeyClass);
             job.setOutputValueClass(oldValueClass);

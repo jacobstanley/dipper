@@ -15,6 +15,7 @@ import           Data.Conduit.Binary (sourceHandle)
 import qualified Data.Conduit.List as CL
 import qualified Data.Conduit.Text as CT
 import           Data.Int (Int64)
+import           Data.List (groupBy, foldl')
 import           Data.Monoid ((<>))
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
@@ -27,7 +28,7 @@ import           System.Process (proc, createProcess, waitForProcess)
 
 import           Dipper.Binary
 
-import Debug.Trace
+import           Debug.Trace
 
 ------------------------------------------------------------------------
 
@@ -162,12 +163,34 @@ mapperWrite = L.concat . map (runPut . putTagged)
 ------------------------------------------------------------------------
 
 reducer :: IO ()
-reducer = L.interact (reducerWrite . map go . reducerRead L.empty L.empty L.empty . showBegin)
+reducer = L.interact $ reducerWrite
+                     . map combine
+                     . groupBy tagKeyEq
+                     . reducerRead L.empty L.empty L.empty
+                     . showBegin
   where
-    go :: Either (Int, T.Text) (T.Text, Int) -> Either (Int, Int) (T.Text, Int)
-    go t = case t of
-        Left  (sz, txt) -> Left  (sz, 1)    -- TODO fold counts
-        Right (txt, sz) -> Right (txt, sz)  -- TODO fold sizes
+    tagKeyEq :: Either (Int, T.Text) (T.Text, Int)
+             -> Either (Int, T.Text) (T.Text, Int)
+             -> Bool
+    tagKeyEq (Left  (x, _)) (Left  (y, _)) = x == y
+    tagKeyEq (Right (x, _)) (Right (y, _)) = x == y
+    tagKeyEq _              _              = False
+
+    combine :: [Either (Int, T.Text) (T.Text, Int)] -> Either (Int, Int) (T.Text, Int)
+    combine xs@(Left  (sz,  _) : _) = Left  (sz,  foldCounts xs)
+    combine xs@(Right (txt, _) : _) = Right (txt, foldSizes  xs)
+
+    foldCounts :: [Either (Int, T.Text) (T.Text, Int)] -> Int
+    foldCounts = foldl' go 0
+      where
+        go acc (Left _)  = acc + 1
+        go _   (Right _) = error "reducer.foldCounts: invalid grouping"
+
+    foldSizes :: [Either (Int, T.Text) (T.Text, Int)] -> Int
+    foldSizes = foldl' go 0
+      where
+        go acc (Right (_, sz)) = acc + sz
+        go _   (Left  _)       = error "reducer.foldSizes: invalid grouping"
 
 reducerRead :: L.ByteString -> L.ByteString -> L.ByteString -> L.ByteString -> [Either (Int, T.Text) (T.Text, Int)]
 reducerRead prev0 prev1 prev2 bs

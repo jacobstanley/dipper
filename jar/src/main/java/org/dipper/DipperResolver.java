@@ -1,6 +1,6 @@
 package org.dipper;
 
-import java.util.TreeMap;
+import java.util.HashMap;
 
 import java.io.DataInput;
 import java.io.DataOutput;
@@ -57,7 +57,7 @@ class DipperInputWriter extends InputWriter<Writable, Writable> {
 class DipperOutputReader extends OutputReader<TagKeyWritable, ValueWritable> {
     private DataInput in;
     private DipperConf conf;
-    private TreeMap<Integer, ValueWritable> values;
+    private HashMap<Integer, ValueWritable> values;
     private TagKeyWritable key;
     private ValueWritable value;
 
@@ -70,7 +70,7 @@ class DipperOutputReader extends OutputReader<TagKeyWritable, ValueWritable> {
         in     = pipeMapRed.getClientInput();
         conf   = new DipperConf(job);
         key    = (TagKeyWritable)ReflectionUtils.newInstance(TagKeyWritable.class, job);
-        values = new TreeMap<Integer, ValueWritable>();
+        values = new HashMap<Integer, ValueWritable>();
     }
 
     private ValueWritable valueOf(int tag) {

@@ -3,7 +3,7 @@ package org.dipper;
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
-import java.util.TreeMap;
+import java.util.HashMap;
 
 import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
@@ -13,7 +13,7 @@ import org.apache.hadoop.io.WritableUtils;
 ////////////////////////////////////////////////////////////////////////
 
 public class TagKeyWritable implements Writable, Configurable {
-    private final TreeMap<Integer, Writable> keys;
+    private final HashMap<Integer, Writable> keys;
     private DipperConf conf;
 
     private int      tag;
@@ -21,7 +21,7 @@ public class TagKeyWritable implements Writable, Configurable {
 
     // Called by ReflectionUtils.newInstance(..) only
     private TagKeyWritable() {
-        keys = new TreeMap<Integer, Writable>();
+        keys = new HashMap<Integer, Writable>();
     }
 
     public void set(int tag, Writable key) {

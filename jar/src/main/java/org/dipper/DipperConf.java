@@ -2,8 +2,9 @@ package org.dipper;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.io.Writable;
-import org.apache.hadoop.io.WritableComparator;
 import org.apache.hadoop.io.WritableComparable;
+import org.apache.hadoop.io.WritableComparator;
+import org.apache.hadoop.mapred.OutputFormat;
 import org.apache.hadoop.util.ReflectionUtils;
 
 ////////////////////////////////////////////////////////////////////////
@@ -22,11 +23,11 @@ public class DipperConf {
     ////////////////////////////////////////////////////////////////////
 
     public Class<? extends Writable> keyClassOf(int tag) {
-        return getClass("dipper.tag." + tag + ".key").asSubclass(Writable.class);
+        return getClass(tagged(tag, "key")).asSubclass(Writable.class);
     }
 
     public Class<? extends Writable> valueClassOf(int tag) {
-        return getClass("dipper.tag." + tag + ".value").asSubclass(Writable.class);
+        return getClass(tagged(tag, "value")).asSubclass(Writable.class);
     }
 
     public Writable newKeyOf(int tag) {
@@ -38,16 +39,31 @@ public class DipperConf {
     }
 
     public WritableComparator newKeyComparatorOf(int tag) {
-        Class<?> keyClass = getClass("dipper.tag." + tag + ".key");
+        Class<?> keyClass = getClass(tagged(tag, "key"));
         return WritableComparator.get(
             keyClass.asSubclass(WritableComparable.class), conf);
     }
 
+    ////////////////////////////////////////////////////////////////////
+
     public String pathOf(int tag) {
-        return conf.get("dipper.tag." + tag + ".path");
+        return conf.get(tagged(tag, "path"));
+    }
+
+    public Class<? extends OutputFormat> formatClassOf(int tag) {
+        return getClass(tagged(tag, "format")).asSubclass(OutputFormat.class);
+    }
+
+    @SuppressWarnings("unchecked")
+    public OutputFormat<Writable, Writable> newFormatOf(int tag) {
+        return ReflectionUtils.newInstance(formatClassOf(tag), conf);
     }
 
     ////////////////////////////////////////////////////////////////////
+
+    private String tagged(int tag, String configKey) {
+        return "dipper.tag." + tag + "." + configKey;
+    }
 
     private Class<?> getClass(String configKey) {
         try {
