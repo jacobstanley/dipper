@@ -89,7 +89,8 @@ runJob hadoopEnv dipperJarPath = do
         --, "-inputformat", "org.apache.hadoop.mapred.SequenceFileInputFormat"
         , "-input", "/user/root/features"
 
-        , "-outputformat", "org.apache.hadoop.mapred.TextOutputFormat"
+        , "-outputformat", "org.dipper.DipperOutputFormat"
+        --, "-outputformat", "org.apache.hadoop.mapred.TextOutputFormat"
         --, "-outputformat", "org.apache.hadoop.mapred.SequenceFileOutputFormat"
         , "-output", "/user/root/test001"
 
