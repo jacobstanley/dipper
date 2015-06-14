@@ -81,19 +81,16 @@ runJob hadoopEnv dipperJarPath = do
         , "-D", "stream.reduce.input=reduce"
         , "-D", "stream.reduce.output=reduce"
 
-        , "-D", "mapred.output.compress=true"
-        , "-D", "mapred.output.compression.codec=org.apache.hadoop.io.compress.SnappyCodec"
-        , "-D", "mapred.output.compression.type=BLOCK"
-        --, "-D", "mapreduce.output.fileoutputformat.compress=true"
-        --, "-D", "mapreduce.output.fileoutputformat.compress.codec=org.apache.hadoop.io.compress.SnappyCodec"
-        --, "-D", "mapreduce.output.fileoutputformat.compress.type=BLOCK"
+        --, "-D", "mapred.output.compress=true"
+        --, "-D", "mapred.output.compression.codec=org.apache.hadoop.io.compress.SnappyCodec"
+        --, "-D", "mapred.output.compression.type=BLOCK"
 
         , "-inputformat",  "org.apache.hadoop.streaming.AutoInputFormat"
         --, "-inputformat", "org.apache.hadoop.mapred.SequenceFileInputFormat"
         , "-input", "/user/root/features"
 
-        --, "-outputformat", "org.apache.hadoop.mapred.TextOutputFormat"
-        , "-outputformat", "org.apache.hadoop.mapred.SequenceFileOutputFormat"
+        , "-outputformat", "org.apache.hadoop.mapred.TextOutputFormat"
+        --, "-outputformat", "org.apache.hadoop.mapred.SequenceFileOutputFormat"
         , "-output", "/user/root/test001"
 
         , "-mapper", takeFileName self <> " " <> "0-mapper"
