@@ -30,6 +30,7 @@ dipperMain :: HadoopEnv -> IO ()
 dipperMain env = do
     args <- getArgs
     case args of
-      []           -> withTempFile "dipper.jar" dipperJar (runJob env) >>= print
-      ["0-mapper"] -> mapper
-      _            -> putStrLn "error: Run with no arguments to execute Hadoop job"
+      []            -> withTempFile "dipper.jar" dipperJar (runJob env) >>= print
+      ["0-mapper"]  -> mapper
+      ["0-reducer"] -> reducer
+      _             -> putStrLn "error: Run with no arguments to execute Hadoop job"

@@ -1,5 +1,7 @@
 package org.dipper;
 
+import java.util.TreeMap;
+
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.EOFException;
@@ -21,19 +23,10 @@ import org.apache.hadoop.util.ReflectionUtils;
 public class DipperResolver extends IdentifierResolver {
     @Override
     public void resolve(String identifier) {
-        if (identifier.equalsIgnoreCase("map")) {
-            setInputWriterClass(DipperInputWriter.class);
-            setOutputReaderClass(DipperMapOutputReader.class);
-            setOutputKeyClass(Text.class);
-            setOutputValueClass(BytesWritable.class);
-        } else if (identifier.equalsIgnoreCase("reduce")) {
-            setInputWriterClass(DipperInputWriter.class);
-            setOutputReaderClass(DipperOutputReader.class);
-            setOutputKeyClass(Text.class);
-            setOutputValueClass(BytesWritable.class);
-        } else {
-            throw new RuntimeException("Dipper: " + identifier);
-        }
+        setInputWriterClass(DipperInputWriter.class);
+        setOutputReaderClass(DipperOutputReader.class);
+        setOutputKeyClass(TagKeyWritable.class);
+        setOutputValueClass(ValueWritable.class);
     }
 }
 
@@ -61,24 +54,12 @@ class DipperInputWriter extends InputWriter<Writable, Writable> {
 
 ////////////////////////////////////////////////////////////////////////
 
-class DipperMapOutputReader extends DipperOutputReader {
-    @Override
-    protected Class<?> getKeyClass(JobConf conf) {
-        return conf.getMapOutputKeyClass();
-    }
-
-    @Override
-    protected Class<?> getValueClass(JobConf conf) {
-        return conf.getMapOutputValueClass();
-    }
-}
-
-////////////////////////////////////////////////////////////////////////
-
-abstract class DipperOutputReader extends OutputReader<Writable, Writable> {
+class DipperOutputReader extends OutputReader<TagKeyWritable, ValueWritable> {
     private DataInput in;
-    private Writable key;
-    private Writable value;
+    private DipperConf conf;
+    private TreeMap<Integer, ValueWritable> values;
+    private TagKeyWritable key;
+    private ValueWritable value;
 
     @Override
     public void initialize(PipeMapRed pipeMapRed) throws IOException {
@@ -86,26 +67,28 @@ abstract class DipperOutputReader extends OutputReader<Writable, Writable> {
 
         JobConf job = (JobConf)pipeMapRed.getConfiguration();
 
-        in    = pipeMapRed.getClientInput();
-        key   = (Writable)ReflectionUtils.newInstance(getKeyClass(job), job);
-        value = (Writable)ReflectionUtils.newInstance(getValueClass(job), job);
-
-        // TODO Read key/value types for each tag from config
+        in     = pipeMapRed.getClientInput();
+        conf   = new DipperConf(job);
+        key    = (TagKeyWritable)ReflectionUtils.newInstance(TagKeyWritable.class, job);
+        values = new TreeMap<Integer, ValueWritable>();
     }
 
-    protected Class<?> getKeyClass(JobConf conf) {
-        return conf.getOutputKeyClass();
-    }
+    private ValueWritable valueOf(int tag) {
+        ValueWritable value = values.get(tag);
 
-    protected Class<?> getValueClass(JobConf conf) {
-        return conf.getOutputValueClass();
+        if (value == null) {
+            value = new ValueWritable(conf.newValueOf(tag));
+            values.put(tag, value);
+        }
+
+        return value;
     }
 
     @Override
     public boolean readKeyValue() throws IOException {
         try {
-            // TODO Read tag, then read the key/value for that tag
             key.readFields(in);
+            value = valueOf(key.getTag());
             value.readFields(in);
             return true;
         } catch (EOFException eof) {
@@ -114,12 +97,12 @@ abstract class DipperOutputReader extends OutputReader<Writable, Writable> {
     }
 
     @Override
-    public Writable getCurrentKey() throws IOException {
+    public TagKeyWritable getCurrentKey() throws IOException {
         return key;
     }
 
     @Override
-    public Writable getCurrentValue() throws IOException {
+    public ValueWritable getCurrentValue() throws IOException {
         return value;
     }
 

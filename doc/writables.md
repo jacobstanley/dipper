@@ -20,11 +20,14 @@ Tagging & Comparing Writables
 Interesting snippets from Hadoop (MR1)
 --------------------------------------
 
+### Key Comparator
+
 If the `mapred.output.key.comparator.class` option is set, then the
 method `getOutputKeyComparator` creates a key comparator using
-reflection, passing the `JobConf` as a constructor argument. If it is
-not set, then it defaults to calling `WritableComparator.get`, passing
-the map output key class as an argument.
+reflection, passing the `JobConf` to set if the comparator happens to be
+`Configurable`. If it is not set, then it defaults to calling
+`WritableComparator.get`, passing the map output key class as an
+argument.
 
     class JobConf extends Configuration {
         ...
@@ -46,3 +49,54 @@ This is great, it means we can compare tagged keys without having to
 store their type in the tag. We should be able to store the embedded
 types of all the tags in the `JobConf` and access it from the
 constructor of our comparator.
+
+
+### Serialization
+
+Serializations are found by reading the `io.serializations` property
+from the configuration, which is a comma-delimited list of classnames.
+
+The default configuration contains `WritableSerialization` and some avro
+serializers.
+
+    public SerializationFactory(Configuration conf) {
+        super(conf);
+        for (String serializerName : conf.getStrings(
+            CommonConfigurationKeys.IO_SERIALIZATIONS_KEY,
+            new String[] { WritableSerialization.class.getName()
+                         , AvroSpecificSerialization.class.getName()
+                         , AvroReflectSerialization.class.getName() }
+                         )) {
+
+            add(conf, serializerName);
+        }
+    }
+
+
+`SerializationFactory` loops over the possible `io.serializations` to
+find the first one which can serialize/deserialize a given class:
+
+    public <T> Serialization<T> getSerialization(Class<T> c) {
+        for (Serialization serialization : serializations) {
+            if (serialization.accept(c)) {
+                return (Serialization<T>) serialization;
+            }
+        }
+        return null;
+    }
+
+
+`WritableSerialization` constructs a `Writable` passing the `JobConf` to
+set if the `Writable` happens to be `Configurable`, and reuses it for
+each value that it deserializes.
+
+    public Writable deserialize(Writable w) throws IOException {
+        Writable writable;
+        if (w == null) {
+            writable = (Writable)ReflectionUtils.newInstance(writableClass, getConf());
+        } else {
+            writable = w;
+        }
+        writable.readFields(dataIn);
+        return writable;
+    }

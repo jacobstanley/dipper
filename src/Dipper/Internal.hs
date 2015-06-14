@@ -27,6 +27,8 @@ import           System.Process (proc, createProcess, waitForProcess)
 
 import           Dipper.Binary
 
+import Debug.Trace
+
 ------------------------------------------------------------------------
 
 data HadoopEnv = HadoopEnv {
@@ -79,7 +81,7 @@ runJob hadoopEnv dipperJarPath = do
 
         --, "-D", "mapreduce.job.name=dipper"
 
-        , "-D", "mapred.output.key.comparator.class=org.dipper.DipperComparator"
+        , "-D", "mapred.output.key.comparator.class=org.dipper.TagKeyComparator"
 
         , "-D", "stream.io.identifier.resolver.class=org.dipper.DipperResolver"
         , "-D", "stream.map.input=map"
@@ -87,24 +89,24 @@ runJob hadoopEnv dipperJarPath = do
         , "-D", "stream.reduce.input=reduce"
         , "-D", "stream.reduce.output=reduce"
 
-        , "-D", "dipper.shuffle.0.key=org.apache.io.LongWritable"
-        , "-D", "dipper.shuffle.0.value=org.apache.io.Text"
+        , "-D", "dipper.tag.0.key=org.apache.hadoop.io.LongWritable"
+        , "-D", "dipper.tag.0.value=org.apache.hadoop.io.Text"
 
-        , "-D", "dipper.shuffle.1.key=org.apache.io.Text"
-        , "-D", "dipper.shuffle.1.value=org.apache.io.LongWritable"
+        , "-D", "dipper.tag.1.key=org.apache.hadoop.io.Text"
+        , "-D", "dipper.tag.1.value=org.apache.hadoop.io.LongWritable"
 
-        , "-D", "dipper.output.0.key=org.apache.io.LongWritable"
-        , "-D", "dipper.output.0.value=org.apache.io.LongWritable"
-        , "-D", "dipper.output.0.format=org.apache.hadoop.mapred.TextOutputFormat"
-        , "-D", "dipper.output.0.path=/user/root/test-output-counts"
+        , "-D", "dipper.tag.2.key=org.apache.hadoop.io.LongWritable"
+        , "-D", "dipper.tag.2.value=org.apache.hadoop.io.LongWritable"
+        , "-D", "dipper.tag.2.format=org.apache.hadoop.mapred.TextOutputFormat"
+        , "-D", "dipper.tag.2.path=/user/root/test-output-counts"
 
-        , "-D", "dipper.output.1.key=org.apache.io.Text"
-        , "-D", "dipper.output.1.value=org.apache.io.LongWritable"
-        , "-D", "dipper.output.1.format=org.apache.hadoop.mapred.SequenceFileOutputFormat"
-        , "-D", "dipper.output.1.compress=true"
-        , "-D", "dipper.output.1.compression.codec=org.apache.hadoop.io.compress.SnappyCodec"
-        , "-D", "dipper.output.1.compression.type=BLOCK"
-        , "-D", "dipper.output.1.path=/user/root/test-output-sizes"
+        , "-D", "dipper.tag.3.key=org.apache.hadoop.io.Text"
+        , "-D", "dipper.tag.3.value=org.apache.hadoop.io.LongWritable"
+        , "-D", "dipper.tag.3.format=org.apache.hadoop.mapred.SequenceFileOutputFormat"
+        , "-D", "dipper.tag.3.compress=true"
+        , "-D", "dipper.tag.3.compression.codec=org.apache.hadoop.io.compress.SnappyCodec"
+        , "-D", "dipper.tag.3.compression.type=BLOCK"
+        , "-D", "dipper.tag.3.path=/user/root/test-output-sizes"
 
         --, "-D", "mapred.output.compress=true"
         --, "-D", "mapred.output.compression.codec=org.apache.hadoop.io.compress.SnappyCodec"
@@ -117,10 +119,10 @@ runJob hadoopEnv dipperJarPath = do
         , "-outputformat", "org.dipper.DipperOutputFormat"
         --, "-outputformat", "org.apache.hadoop.mapred.TextOutputFormat"
         --, "-outputformat", "org.apache.hadoop.mapred.SequenceFileOutputFormat"
-        --, "-output", "/user/root/test001"
+        , "-output", "/user/root/test-dummy"
 
-        , "-mapper", takeFileName self <> " " <> "0-mapper"
-        , "-reducer", "NONE"
+        , "-mapper",  takeFileName self <> " " <> "0-mapper"
+        , "-reducer", takeFileName self <> " " <> "0-reducer"
         ]
 
 ------------------------------------------------------------------------
@@ -146,13 +148,13 @@ mapperWrite = L.concat . map (runPut . putTagged)
   where
     putTagged t = case t of
         Left (k, v) -> do
-            -- shuffle.0
+            -- tag.0
             putVInt 0
             putWord64be (fromIntegral k)
             putText v
 
         Right (k, v) -> do
-            -- shuffle.1
+            -- tag.1
             putVInt 1
             putText k
             putWord64be (fromIntegral v)
@@ -160,43 +162,52 @@ mapperWrite = L.concat . map (runPut . putTagged)
 ------------------------------------------------------------------------
 
 reducer :: IO ()
-reducer = L.interact (reducerWrite . map go . reducerRead)
+reducer = L.interact (reducerWrite . map go . reducerRead L.empty L.empty L.empty . showBegin)
   where
     go :: Either (Int, T.Text) (T.Text, Int) -> Either (Int, Int) (T.Text, Int)
     go t = case t of
         Left  (sz, txt) -> Left  (sz, 1)    -- TODO fold counts
         Right (txt, sz) -> Right (txt, sz)  -- TODO fold sizes
 
-reducerRead :: L.ByteString -> [Either (Int, T.Text) (T.Text, Int)]
-reducerRead bs | L.null bs = []
-               | otherwise = case runGetOrFail getTagged bs of
-                   Left  (_,   _, err) -> error ("mapperRead: " ++ err)
-                   Right (bs', _, x)   -> x : reducerRead bs'
+reducerRead :: L.ByteString -> L.ByteString -> L.ByteString -> L.ByteString -> [Either (Int, T.Text) (T.Text, Int)]
+reducerRead prev0 prev1 prev2 bs
+    | L.null bs = []
+    | otherwise = case runGetOrFail getTagged bs of
+        Right (bs', _, x)   -> x : reducerRead prev1 prev2 bs bs'
+        Left  (_,   _, err) -> error ("reducerRead: " ++ err ++ "\n"
+                                   ++ "previous bytes = " ++ show (L.take 100 prev0))
+
+showBegin :: L.ByteString -> L.ByteString
+showBegin bs = trace bs' bs
+  where
+    bs' = "Start bytes = " ++ show (L.take 100 bs)
 
 getTagged :: Get (Either (Int, T.Text) (T.Text, Int))
 getTagged = do
     tag <- getVInt
     case tag of
-        0 -> Left  <$> ((,) <$> (fromIntegral <$> getWord32be)
+        0 -> Left  <$> ((,) <$> (fromIntegral <$> getWord64be)
                             <*> getText)
 
         1 -> Right <$> ((,) <$> getText
-                            <*> (fromIntegral <$> getWord32be))
+                            <*> (fromIntegral <$> getWord64be))
 
-        _ -> error "getTagged: unknown tag"
+        _ -> do
+            xs <- getByteString 100
+            fail ("getTagged: unknown tag = " ++ show tag ++ ", next bytes = " ++ show xs)
 
 reducerWrite :: [Either (Int, Int) (T.Text, Int)] -> L.ByteString
 reducerWrite = L.concat . map (runPut . putTagged)
   where
     putTagged t = case t of
         Left (k, v) -> do
-            -- output.0
-            putVInt 0
+            -- tag.2
+            putVInt 2
             putWord64be (fromIntegral k)
             putWord64be (fromIntegral v)
 
         Right (k, v) -> do
-            -- output.1
-            putVInt 1
+            -- tag.3
+            putVInt 3
             putText k
             putWord64be (fromIntegral v)

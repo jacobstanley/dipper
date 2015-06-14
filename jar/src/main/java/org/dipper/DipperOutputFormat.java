@@ -16,8 +16,8 @@ import org.apache.hadoop.util.Progressable;
 
 ////////////////////////////////////////////////////////////////////////
 
-public class DipperOutputFormat extends FileOutputFormat<Writable, Writable> {
-    public RecordWriter<Writable, Writable> getRecordWriter(
+public class DipperOutputFormat extends FileOutputFormat<TagKeyWritable, ValueWritable> {
+    public RecordWriter<TagKeyWritable, ValueWritable> getRecordWriter(
             FileSystem fs, JobConf job, String name, Progressable progress) throws IOException {
         return new DipperRecordWriter(fs, job, name, progress);
     }
@@ -25,47 +25,50 @@ public class DipperOutputFormat extends FileOutputFormat<Writable, Writable> {
 
 ////////////////////////////////////////////////////////////////////////
 
-class DipperRecordWriter implements RecordWriter<Writable, Writable> {
+class DipperRecordWriter implements RecordWriter<TagKeyWritable, ValueWritable> {
 
     private final FileSystem fs;
     private final JobConf job;
     private final String partName;
     private final Progressable progress;
 
-    private final TreeMap<String, RecordWriter<Writable, Writable>> writers;
+    private final DipperConf conf;
+    private final TreeMap<Integer, RecordWriter<Writable, Writable>> writers;
 
     public DipperRecordWriter(FileSystem fs, JobConf job, String name, Progressable progress) {
         this.fs       = fs;
         this.job      = job;
         this.partName = name;
         this.progress = progress;
-        this.writers  = new TreeMap<String, RecordWriter<Writable, Writable>>();
+        this.conf     = new DipperConf(job);
+        this.writers  = new TreeMap<Integer, RecordWriter<Writable, Writable>>();
     }
 
-    public void write(Writable key, Writable value) throws IOException {
-        // TODO get the path based on the key
-        String path = partName;
+    public void write(TagKeyWritable k, ValueWritable v) throws IOException {
+        int      tag   = k.getTag();
+        Writable key   = k.getKey();
+        Writable value = v.get();
 
-        // TODO extract the actual key/value
-        Writable actualKey   = key;
-        Writable actualValue = value;
-
-        writerOf(path).write(actualKey, actualValue);
+        writerOf(tag).write(key, value);
     }
 
-    private RecordWriter<Writable, Writable> writerOf(String path) throws IOException {
-        RecordWriter<Writable, Writable> writer = writers.get(path);
+    private RecordWriter<Writable, Writable> writerOf(int tag) throws IOException {
+        RecordWriter<Writable, Writable> writer = writers.get(tag);
 
         if (writer == null) {
-            writer = getSequenceFileWriter(fs, job, path, progress);
-            writers.put(path, writer);
+            Class<?> keyClass   = conf.keyClassOf(tag);
+            Class<?> valueClass = conf.valueClassOf(tag);
+            String   path       = conf.pathOf(tag) + "/" + partName;
+
+            writer = getSequenceFileWriter(fs, job, path, progress, keyClass, valueClass);
+            writers.put(tag, writer);
         }
 
         return writer;
     }
 
     public void close(Reporter reporter) throws IOException {
-        Iterator<String> keys = writers.keySet().iterator();
+        Iterator<Integer> keys = writers.keySet().iterator();
 
         while (keys.hasNext()) {
             writers.get(keys.next()).close(reporter);
@@ -79,10 +82,27 @@ class DipperRecordWriter implements RecordWriter<Writable, Writable> {
     private SequenceFileOutputFormat<Writable, Writable> sequenceFormat = null;
 
     protected RecordWriter<Writable, Writable> getSequenceFileWriter(
-            FileSystem fs, JobConf job, String name, Progressable progress) throws IOException {
+            FileSystem fs,
+            JobConf job,
+            String name,
+            Progressable progress,
+            Class<?> keyClass,
+            Class<?> valueClass) throws IOException {
+
         if (sequenceFormat == null) {
             sequenceFormat = new SequenceFileOutputFormat<Writable, Writable>();
         }
-        return sequenceFormat.getRecordWriter(fs, job, name, progress);
+
+        Class<?> oldKeyClass   = job.getOutputKeyClass();
+        Class<?> oldValueClass = job.getOutputValueClass();
+
+        try {
+            job.setOutputKeyClass(keyClass);
+            job.setOutputValueClass(valueClass);
+            return sequenceFormat.getRecordWriter(fs, job, name, progress);
+        } finally {
+            job.setOutputKeyClass(oldKeyClass);
+            job.setOutputValueClass(oldValueClass);
+        }
     }
 }
