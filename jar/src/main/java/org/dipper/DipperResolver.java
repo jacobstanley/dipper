@@ -16,6 +16,8 @@ import org.apache.hadoop.streaming.io.InputWriter;
 import org.apache.hadoop.streaming.io.OutputReader;
 import org.apache.hadoop.util.ReflectionUtils;
 
+////////////////////////////////////////////////////////////////////////
+
 public class DipperResolver extends IdentifierResolver {
     @Override
     public void resolve(String identifier) {
@@ -34,6 +36,8 @@ public class DipperResolver extends IdentifierResolver {
         }
     }
 }
+
+////////////////////////////////////////////////////////////////////////
 
 class DipperInputWriter extends InputWriter<Writable, Writable> {
     private DataOutput out;
@@ -55,6 +59,8 @@ class DipperInputWriter extends InputWriter<Writable, Writable> {
     }
 }
 
+////////////////////////////////////////////////////////////////////////
+
 class DipperMapOutputReader extends DipperOutputReader {
     @Override
     protected Class<?> getKeyClass(JobConf conf) {
@@ -66,6 +72,8 @@ class DipperMapOutputReader extends DipperOutputReader {
         return conf.getMapOutputValueClass();
     }
 }
+
+////////////////////////////////////////////////////////////////////////
 
 abstract class DipperOutputReader extends OutputReader<Writable, Writable> {
     private DataInput in;
@@ -81,6 +89,8 @@ abstract class DipperOutputReader extends OutputReader<Writable, Writable> {
         in    = pipeMapRed.getClientInput();
         key   = (Writable)ReflectionUtils.newInstance(getKeyClass(job), job);
         value = (Writable)ReflectionUtils.newInstance(getValueClass(job), job);
+
+        // TODO Read key/value types for each tag from config
     }
 
     protected Class<?> getKeyClass(JobConf conf) {
@@ -94,6 +104,7 @@ abstract class DipperOutputReader extends OutputReader<Writable, Writable> {
     @Override
     public boolean readKeyValue() throws IOException {
         try {
+            // TODO Read tag, then read the key/value for that tag
             key.readFields(in);
             value.readFields(in);
             return true;

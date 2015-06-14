@@ -81,6 +81,13 @@ runJob hadoopEnv dipperJarPath = do
         , "-D", "stream.reduce.input=reduce"
         , "-D", "stream.reduce.output=reduce"
 
+        , "-D", "dipper.shuffle.0.key=org.apache.io.Text"
+        , "-D", "dipper.shuffle.0.value=org.apache.io.BytesWritable"
+
+        , "-D", "dipper.output.0.key=org.apache.io.Text"
+        , "-D", "dipper.output.0.value=org.apache.io.BytesWritable"
+        , "-D", "dipper.output.0.path=/user/root/output1"
+
         --, "-D", "mapred.output.compress=true"
         --, "-D", "mapred.output.compression.codec=org.apache.hadoop.io.compress.SnappyCodec"
         --, "-D", "mapred.output.compression.type=BLOCK"
