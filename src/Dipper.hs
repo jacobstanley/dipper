@@ -4,25 +4,10 @@ module Dipper (
     , cloudera
     ) where
 
-import           Control.Exception (bracket, catch)
-import qualified Data.ByteString.Char8 as C
-import           System.Directory (getTemporaryDirectory, removeFile)
 import           System.Environment (getArgs)
-import           System.IO (openBinaryTempFileWithDefaultPermissions, hClose)
 
 import           Dipper.Internal
-import           Dipper.Jar (dipperJar)
-
-------------------------------------------------------------------------
-
-withTempFile :: String -> C.ByteString -> (FilePath -> IO a) -> IO a
-withTempFile name content action = do
-    tmp <- getTemporaryDirectory
-    bracket (openBinaryTempFileWithDefaultPermissions tmp name)
-            (\(p, h) -> hClose h >> ignoreIOErrors (removeFile p))
-            (\(p, h) -> C.hPut h content >> hClose h >> action p)
-  where
-    ignoreIOErrors ioe = ioe `catch` (\e -> const (return ()) (e :: IOError))
+import           Dipper.Jar (withDipperJar)
 
 ------------------------------------------------------------------------
 
@@ -30,7 +15,7 @@ dipperMain :: HadoopEnv -> IO ()
 dipperMain env = do
     args <- getArgs
     case args of
-      []            -> withTempFile "dipper.jar" dipperJar (runJob env) >>= print
+      []            -> withDipperJar (runJob env) >>= print
       ["0-mapper"]  -> mapper
       ["0-reducer"] -> reducer
       _             -> putStrLn "error: Run with no arguments to execute Hadoop job"

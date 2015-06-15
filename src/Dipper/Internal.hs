@@ -177,6 +177,7 @@ reducer = L.interact $ reducerWrite
     combine :: [Either (Int, T.Text) (T.Text, Int)] -> Either (Int, Int) (T.Text, Int)
     combine xs@(Left  (sz,  _) : _) = Left  (sz,  foldCounts xs)
     combine xs@(Right (txt, _) : _) = Right (txt, foldSizes  xs)
+    combine _                       = error "reducer.combine: invalid grouping"
 
     foldCounts :: [Either (Int, T.Text) (T.Text, Int)] -> Int
     foldCounts = foldl' go 0
