@@ -1,8 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-{-# OPTIONS_GHC -w #-}
-
 module Dipper.Internal where
 
 import           Control.Concurrent.Async (Concurrently (..))
@@ -14,7 +12,6 @@ import           Data.Conduit
 import           Data.Conduit.Binary (sourceHandle)
 import qualified Data.Conduit.List as CL
 import qualified Data.Conduit.Text as CT
-import           Data.Int (Int64)
 import           Data.List (groupBy, foldl')
 import           Data.Monoid ((<>))
 import qualified Data.Text as T
@@ -43,7 +40,7 @@ cloudera :: HadoopEnv
 cloudera = HadoopEnv "/usr/lib/hadoop-0.20-mapreduce" "hadoop"
 
 streamingJar :: HadoopEnv -> FilePath
-streamingJar env = hadoopHome env <> "/contrib/streaming/hadoop-streaming.jar"
+streamingJar henv = hadoopHome henv <> "/contrib/streaming/hadoop-streaming.jar"
 
 ------------------------------------------------------------------------
 
@@ -81,6 +78,7 @@ runJob hadoopEnv dipperJarPath = do
         , "-libjars", dipperJarPath
 
         --, "-D", "mapreduce.job.name=dipper"
+        --, "-D", "mapred.max.tracker.failures=1"
 
         , "-D", "mapred.output.key.comparator.class=org.dipper.TagKeyComparator"
 
