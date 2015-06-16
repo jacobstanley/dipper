@@ -19,7 +19,6 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import           Data.Tuple.Strict (Pair(..))
 import           Data.Typeable (Typeable, typeOf)
-import           Data.Word (Word8)
 
 import           Dipper.Binary
 
@@ -209,7 +208,7 @@ instance forall a. HadoopWritable a => HadoopWritable [a] where
 newtype Name n a = Name n
     deriving (Eq, Ord, Show, Typeable)
 
-type Tag = Word8
+type Tag = Int
 
 data Input a = MapperInput FilePath
              | ReducerInput Tag

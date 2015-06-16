@@ -13,7 +13,9 @@
 
 module Dipper.Interpreter where
 
+import           Control.Exception (SomeException)
 import           Control.Monad (mplus, void, forever)
+import           Control.Monad.Catch (MonadThrow(..))
 import           Control.Monad.Identity (Identity(..))
 import           Control.Monad.State (MonadState(..), modify, runState, execState)
 import           Data.Binary.Get
@@ -21,12 +23,18 @@ import           Data.Binary.Put
 import qualified Data.ByteString as B
 import           Data.ByteString.Builder
 import qualified Data.ByteString.Lazy as L
+import           Data.Conduit ((=$=), ($$), runConduit, yield, sequenceConduits, sequenceSinks)
+import           Data.Conduit (Source, Sink, Consumer, Producer, Conduit)
+import qualified Data.Conduit.Binary as CB
+import qualified Data.Conduit.List as CL
+import           Data.Conduit.Serialization.Binary (conduitGet, conduitPut)
 import           Data.Dynamic
 import           Data.Foldable (traverse_)
 import           Data.Int (Int32, Int64)
 import           Data.List (foldl', sort, sortBy, unfoldr, isSuffixOf)
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
+import           Data.Maybe (fromMaybe)
 import           Data.Maybe (maybeToList, mapMaybe)
 import           Data.Ord (Ordering(..))
 import           Data.Set (Set)
@@ -42,11 +50,6 @@ import           Dipper.Binary
 import           Dipper.Types
 
 import           Debug.Trace
-
-import           Data.Conduit ((=$=), ($$), yield)
-import           Data.Conduit (Source, Sink, Consumer, Producer, Conduit)
-import qualified Data.Conduit as C
-import qualified Data.Conduit.List as C
 
 ------------------------------------------------------------------------
 
@@ -66,8 +69,9 @@ type Mapper  = Step FilePath Tag
 type Reducer = Step Tag FilePath
 
 data Stage = Stage {
-    stageInputs  :: Map FilePath KVFormat
-  , stageOutputs :: Map FilePath KVFormat
+    stageInputs   :: Map FilePath KVFormat
+  , stageShuffle  :: Map Tag      KVFormat
+  , stageOutputs  :: Map FilePath KVFormat
   } deriving (Eq, Ord, Show)
 
 data Pipeline = Pipeline {
@@ -105,59 +109,65 @@ testPipeline p@Pipeline{..} files = foldl runStage files stages
              -> Map FilePath L.ByteString
     runStage fs Stage{..}
       | not (null missing) = error ("testPipeline.runStage: missing inputs: " ++ show missing)
-      | otherwise = M.union fs
-                  . createFiles
-                  . runReducer
-                  . shuffle
-                  . concat
-                  . M.elems
-                  $ M.intersectionWith runMapper pMappers avail
+      | otherwise = let
+                        mapOutputs :: Map FilePath (Source (Either SomeException) (Row Tag))
+                        mapOutputs = M.intersectionWith runMapper pMappers avail
+
+                        mapOutput :: Source (Either SomeException) (Row Tag)
+                        mapOutput = sequence_ (M.elems mapOutputs)
+
+                        reduceOutput = createFiles (mapOutput =$= shuffle =$= runReducer)
+                    in
+                        M.union fs reduceOutput
       where
         missing :: [FilePath]
         missing = M.keys (stageInputs `M.difference` fs)
 
-        avail :: Map FilePath L.ByteString
-        avail = fs `M.intersection` stageInputs
+        avail :: Monad m => Map FilePath (Source m B.ByteString)
+        avail = M.map CB.sourceLbs fs `M.intersection` stageInputs
 
-        createFiles :: [Row FilePath] -> Map FilePath L.ByteString
+        createFiles :: Source (Either SomeException) (Row FilePath) -> Map FilePath L.ByteString
         createFiles rows = M.mapWithKey go stageOutputs
           where
-            go path fmt = encodeUnitRows fmt
-                        . map (withTag ())
-                        . filter (hasTag path)
+            go :: FilePath -> KVFormat -> L.ByteString
+            go path fmt = L.fromChunks
+                        . either (error . show) id
+                        . runConduit
                         $ rows
+                      =$= CL.filter (hasTag path)
+                      =$= CL.map (withTag ())
+                      =$= encodeUnitRows fmt
+                      =$= CL.consume
 
-        runMapper :: Mapper -> L.ByteString -> [Row Tag]
-        runMapper Step{..} bs =
-            runIdentity (C.sourceList irows =$= stepExec $$ tagSink)
+        runMapper :: (MonadThrow m, Typeable m)
+                  => Mapper
+                  -> Source m B.ByteString
+                  -> Source m (Row Tag)
+        runMapper Step{..} = (=$= decodeUnitRows schema =$= stepExec)
           where
             path   = fName stepInput
             schema = fFormat stepInput
-            irows  = decodeUnitRows schema bs
 
-        tagSink :: Sink (Row Tag) Identity [Row Tag]
-        tagSink = C.consume
-
-        runReducer :: [Row Tag] -> [Row FilePath]
-        runReducer irows = concat orows
+        runReducer :: (MonadThrow m, Typeable m) => Conduit (Row Tag) m (Row FilePath)
+        runReducer = encodeTagRows schema
+                 =$= decodeTagRows schema
+                 =$= reducers
           where
-            orows = runIdentity (irows' $$ sink)
+            reducers = void
+                     . sequenceConduits
+                     . M.elems
+                     . M.mapWithKey (\tag r -> CL.filter (hasTag tag)
+                                           =$= CL.map (withTag ())
+                                           =$= stepExec r)
+                     $ pReducers
 
-            irows' = C.sourceList
-                   . decodeTagRows schema
-                   . encodeTagRows schema
-                   $ irows
+    fileSink :: Sink (Row FilePath) Identity [Row FilePath]
+    fileSink = CL.consume
 
-            sink = C.sequenceSinks
-                 . M.elems
-                 . M.mapWithKey (\tag r -> C.filter (hasTag tag)
-                                       =$= C.map (withTag ())
-                                       =$= stepExec r
-                                       =$= fileSink )
-                 $ pReducers
-
-    shuffle :: [Row Tag] -> [Row Tag]
-    shuffle = sortBy tagKeyCompare
+    shuffle :: Monad m => Conduit (Row Tag) m (Row Tag)
+    shuffle = do
+        xs <- CL.consume
+        CL.sourceList (sortBy tagKeyCompare xs)
 
     tagKeyCompare :: Row Tag -> Row Tag -> Ordering
     tagKeyCompare (Row t1 k1 _) (Row t2 k2 _) =
@@ -170,10 +180,9 @@ testPipeline p@Pipeline{..} files = foldl runStage files stages
     schema :: Map Tag KVFormat
     schema = M.map (\r -> fFormat (stepInput r)) pReducers
 
-    fileSink :: Sink (Row FilePath) Identity [Row FilePath]
-    fileSink = C.consume
-
 ------------------------------------------------------------------------
+
+-- TODO these are almost the same
 
 filesOfPipeline :: Pipeline -> Map FilePath KVFormat
 filesOfPipeline Pipeline{..} = ins `M.union` outs
@@ -187,6 +196,21 @@ filesOfPipeline Pipeline{..} = ins `M.union` outs
     outs = M.fromList
          . map (\(Formatted n f) -> (n, f))
          . concatMap stepOutputs
+         . M.elems
+         $ pReducers
+
+tagsOfPipeline :: Pipeline -> Map Tag KVFormat
+tagsOfPipeline Pipeline{..} = ins `M.union` outs
+  where
+    ins = M.fromList
+        . map (\(Formatted n f) -> (n, f))
+        . concatMap stepOutputs
+        . M.elems
+        $ pMappers
+
+    outs = M.fromList
+         . map (\(Formatted n f) -> (n, f))
+         . map stepInput
          . M.elems
          $ pReducers
 
@@ -204,12 +228,14 @@ stagesOfPipeline p@Pipeline{..} = unfoldr nextStage inputPaths
                . filter (not . (".tmp" `isSuffixOf`))
                $ M.keys pMappers
 
-    fromSet s = filesOfPipeline p `M.intersection` M.fromSet (const ()) s
+    fromFiles s = filesOfPipeline p `M.intersection` M.fromSet (const ()) s
+    fromTags  s = tagsOfPipeline  p `M.intersection` M.fromSet (const ()) s
 
     nextStage :: Set FilePath -> Maybe (Stage, Set FilePath)
     nextStage avail | S.null m'used = Nothing
-                    | otherwise     = Just (Stage (fromSet m'used)
-                                                  (fromSet r'outs), avail')
+                    | otherwise     = Just (Stage (fromFiles m'used)
+                                                  (fromTags  m'outs)
+                                                  (fromFiles r'outs), avail')
       where
         (m'used, m'outs) = runnable (mkDeps pMappers)  avail
         (_,      r'outs) = runnable (mkDeps pReducers) m'outs
@@ -334,18 +360,18 @@ dynJoin :: (DynConduit m b, DynDup m b)
 dynJoin (s0, DynDup d) (s1, _) = (d s0 s1, DynDup d)
 
 dup :: (Show a, Monad m) => Conduit a m b -> Conduit a m b -> Conduit a m b
-dup c1 c2 = void (C.sequenceConduits [c1, c2])
+dup c1 c2 = void (sequenceConduits [c1, c2])
 
 ------------------------------------------------------------------------
 
 foldValues :: forall m k v. (Monad m, Eq k)
            => (v -> v -> v)
            -> Conduit (Pair k v) m (Pair k v)
-foldValues append = goM =$= C.catMaybes
+foldValues append = goM =$= CL.catMaybes
   where
     goM :: Conduit (Pair k v) m (Maybe (Pair k v))
     goM = do
-        s <- C.mapAccum go Nothing
+        s <- CL.mapAccum go Nothing
         case s of
           Nothing     -> yield Nothing
           Just (k, v) -> yield (Just (k :!: v))
@@ -381,7 +407,7 @@ evalTail conduit tl = case tl of
           conduit'a = fromDynConduit "evalTail" conduit
 
           conduit'b :: Conduit b m o
-          conduit'b = C.concatMap f =$= conduit'a
+          conduit'b = CL.concatMap f =$= conduit'a
       in
           (dynConduit conduit'b, dynDup conduit'b) `withName` fvOfAtom input
 
@@ -412,7 +438,7 @@ evalMapperTerm term = case term of
           enc x = withTag tag (encodeKV x)
 
           conduit'b :: Conduit b m (Row Tag)
-          conduit'b = C.map enc
+          conduit'b = CL.map enc
 
           conduits'tm = evalMapperTerm tm
           conduits'mo = M.singleton n (dynConduit conduit'b, dynDup conduit'b)
@@ -440,7 +466,7 @@ evalMapperTerm' term = case term of
           conduit'b :: Conduit b m (Row Tag)
           conduit'b =  fromDynConduit "evalMapperTerm'" dynConduit
       in
-          C.map decodeKV =$= conduit'b
+          CL.map decodeKV =$= conduit'b
   where
     conduits = evalMapperTerm term
 
@@ -460,7 +486,7 @@ evalReducerTerm term = case term of
           enc x = withTag path (encodeKV x)
 
           conduit'b :: Conduit b m (Row FilePath)
-          conduit'b = C.map enc
+          conduit'b = CL.map enc
 
           conduits'tm = evalReducerTerm tm
           conduits'ro = M.singleton n (dynConduit conduit'b, dynDup conduit'b)
@@ -488,42 +514,37 @@ evalReducerTerm' term = case term of
           conduit'b :: Conduit b m (Row FilePath)
           conduit'b = fromDynConduit "evalReducerTerm'" dynConduit
       in
-          C.map decodeKV =$= conduit'b
+          CL.map decodeKV =$= conduit'b
   where
     conduits = evalReducerTerm term
 
 ------------------------------------------------------------------------
 
-decodeUnitRows :: KVFormat -> L.ByteString -> [Row ()]
+decodeUnitRows :: MonadThrow m => KVFormat -> Conduit B.ByteString m (Row ())
 decodeUnitRows schema = decodeRows (return ()) (M.singleton () schema)
 
-encodeUnitRows :: KVFormat -> [Row ()] -> L.ByteString
+encodeUnitRows :: MonadThrow m => KVFormat -> Conduit (Row ()) m B.ByteString
 encodeUnitRows schema = encodeRows (const (return ())) (M.singleton () schema)
 
-decodePathRows :: Map FilePath KVFormat -> L.ByteString -> [Row FilePath]
+decodePathRows :: MonadThrow m => Map FilePath KVFormat -> Conduit B.ByteString m (Row FilePath)
 decodePathRows = decodeRows (T.unpack . T.decodeUtf8 <$> getLayout VarVInt)
 
-encodePathRows :: Map FilePath KVFormat -> [Row FilePath] -> L.ByteString
+encodePathRows :: MonadThrow m => Map FilePath KVFormat -> Conduit (Row FilePath) m B.ByteString
 encodePathRows = encodeRows (putLayout VarVInt . T.encodeUtf8 . T.pack)
 
-decodeTagRows :: Map Tag KVFormat -> L.ByteString -> [Row Tag]
-decodeTagRows = decodeRows getWord8
+decodeTagRows :: MonadThrow m => Map Tag KVFormat -> Conduit B.ByteString m (Row Tag)
+decodeTagRows = decodeRows getVInt
 
-encodeTagRows :: Map Tag KVFormat -> [Row Tag] -> L.ByteString
-encodeTagRows = encodeRows putWord8
+encodeTagRows :: MonadThrow m => Map Tag KVFormat -> Conduit (Row Tag) m B.ByteString
+encodeTagRows = encodeRows putVInt
 
 ------------------------------------------------------------------------
 
--- TODO this is unlikely to have good performance
-decodeRows :: (Show a, Ord a) => Get a -> Map a KVFormat -> L.ByteString -> [Row a]
-decodeRows getTag schema bs
-    | L.null bs = []
-    | otherwise = case runGetOrFail (getRow getTag schema) bs of
-        Left  (_,   _, err) -> error ("decodeRows: " ++ err)
-        Right (bs', o, x)   -> x : decodeRows getTag schema bs'
+decodeRows :: (MonadThrow m, Show a, Ord a) => Get a -> Map a KVFormat -> Conduit B.ByteString m (Row a)
+decodeRows getTag schema = conduitGet (getRow getTag schema)
 
-encodeRows :: (Show a, Ord a) => (a -> Put) -> Map a KVFormat -> [Row a] -> L.ByteString
-encodeRows putTag schema = runPut . mapM_ (putRow putTag schema)
+encodeRows :: (MonadThrow m, Show a, Ord a) => (a -> Put) -> Map a KVFormat -> Conduit (Row a) m B.ByteString
+encodeRows putTag schema = CL.map (putRow putTag schema) =$= conduitPut
 
 getRow :: (Show a, Ord a) => Get a -> Map a KVFormat -> Get (Row a)
 getRow getTag schema = do
@@ -557,7 +578,12 @@ int32Format = format (undefined :: Int32)
 intFormat :: Format
 intFormat = format (undefined :: Int)
 
-testEncDecTagged = take 10 (decodeRows getWord8 schema (encodeRows putWord8 schema xs))
+testEncDecTagged :: Either SomeException [Row Word8]
+testEncDecTagged = runConduit
+                 $ CL.sourceList xs
+               =$= encodeRows putWord8 schema
+               =$= decodeRows getWord8 schema
+               =$= CL.take 10
   where
     xs = cycle [ Row 67 "abcdefg" B.empty
                , Row 67 "123"     B.empty
@@ -566,8 +592,11 @@ testEncDecTagged = take 10 (decodeRows getWord8 schema (encodeRows putWord8 sche
     schema = M.fromList [ (67, textFormat  :!: unitFormat)
                         , (22, int32Format :!: bytesFormat) ]
 
-sampleTextText :: L.ByteString
-sampleTextText = encodeUnitRows (textFormat :!: textFormat) rows
+sampleTextText :: Either SomeException L.ByteString
+sampleTextText = fmap L.fromChunks . runConduit
+               $ CL.sourceList rows
+             =$= encodeUnitRows (textFormat :!: textFormat)
+             =$= CL.consume
   where
     rows = [ Row () "hello"   "hello"
            , Row () "foo"     "foo"
@@ -578,8 +607,11 @@ sampleTextText = encodeUnitRows (textFormat :!: textFormat) rows
            , Row () "foo"     "baz"
            ]
 
-sampleTextInt :: L.ByteString
-sampleTextInt = encodeUnitRows (textFormat :!: intFormat) rows
+sampleTextInt :: Either SomeException L.ByteString
+sampleTextInt = fmap L.fromChunks . runConduit
+              $ CL.sourceList rows
+            =$= encodeUnitRows (textFormat :!: intFormat)
+            =$= CL.consume
   where
     rows = [ Row () "hello"   "00000000"
            , Row () "foo"     "00000001"
