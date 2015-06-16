@@ -47,7 +47,7 @@ public class DipperConf {
     ////////////////////////////////////////////////////////////////////
 
     public String pathOf(int tag) {
-        return conf.get(tagged(tag, "path"));
+        return unsafeGet(tagged(tag, "path"));
     }
 
     public Class<? extends OutputFormat> formatClassOf(int tag) {
@@ -67,10 +67,18 @@ public class DipperConf {
 
     private Class<?> getClass(String configKey) {
         try {
-            String className = conf.get(configKey);
+            String className = unsafeGet(configKey);
             return Class.forName(className);
         } catch (ClassNotFoundException ex) {
             throw new RuntimeException("Could not create class specified by '" + configKey + "'", ex);
         }
+    }
+
+    private String unsafeGet(String configKey) {
+        String configValue = conf.get(configKey);
+        if (configValue == null) {
+            throw new RuntimeException("Configuration value not found: " + configKey);
+        }
+        return configValue;
     }
 }
