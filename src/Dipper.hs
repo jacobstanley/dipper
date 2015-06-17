@@ -10,7 +10,7 @@ module Dipper (
 
 import           Control.Applicative ((<|>))
 import           Control.Concurrent.Async (Concurrently(..))
-import           Control.Monad (void)
+import           Control.Monad (void, zipWithM_, foldM)
 import           Data.Conduit ((=$=), runConduit, sequenceConduits)
 import           Data.Conduit (Source, Sink, Consumer, Producer, Conduit)
 import qualified Data.Conduit.Binary as CB
@@ -26,7 +26,7 @@ import qualified Data.Text.IO as T
 import           Data.Tuple.Strict (Pair(..))
 import           System.Environment (getEnvironment)
 import           System.Environment (getExecutablePath, getArgs, lookupEnv)
-import           System.Exit (exitWith)
+import           System.Exit (ExitCode(..), exitWith)
 import           System.FilePath (takeFileName)
 import           System.FilePath.Posix (takeDirectory)
 import           System.IO (Handle, stdin, stdout, stderr)
@@ -49,18 +49,23 @@ dipperMain henv jobDir term = do
       ["reducer"] -> runReducer pipeline
       _           -> putStrLn "error: Run with no arguments to execute Hadoop job"
   where
-    pipeline = mkPipeline term
+    pipeline = mkPipeline jobDir term
 
 ------------------------------------------------------------------------
 
 runJob :: HadoopEnv -> FilePath -> FilePath -> Pipeline -> IO ()
-runJob henv jar jobDir pipeline =
-    mapM_ (runStage henv jar jobDir pipeline) (stagesOfPipeline pipeline)
+runJob henv jar jobDir pipeline = do
+    print stages
+    zipWithM_ go [1..] stages
+  where
+    stages = stagesOfPipeline pipeline
+
+    go ix stage = runStage henv jar (jobDir ++ "/stage." ++ show ix) pipeline stage
 
 ------------------------------------------------------------------------
 
 runStage :: HadoopEnv -> FilePath -> FilePath -> Pipeline -> Stage -> IO ()
-runStage henv jar jobDir pipeline stage = do
+runStage henv jar stageDir pipeline stage = do
     self <- getExecutablePath
 
     putStrLn "=== Arguments ==="
@@ -75,7 +80,9 @@ runStage henv jar jobDir pipeline stage = do
         *> Concurrently (output err "stderr")
 
     code <- waitForProcess h
-    exitWith code
+    case code of
+      ExitSuccess   -> return ()
+      ExitFailure _ -> exitWith code
   where
     output :: Handle -> T.Text -> IO ()
     output src name = do
@@ -93,13 +100,14 @@ runStage henv jar jobDir pipeline stage = do
         , "-files", self
         , "-libjars", jar
 
+        -- , "-D", "mapred.reduce.tasks=300"
         , "-D", "mapred.output.key.comparator.class=org.dipper.TagKeyComparator"
         , "-D", "stream.io.identifier.resolver.class=org.dipper.DipperResolver"
 
         ] ++ stageArgs pipeline stage ++
 
         [ "-outputformat", "org.dipper.DipperOutputFormat"
-        , "-output", jobDir
+        , "-output", stageDir
 
         , "-mapper",  takeFileName self <> " mapper"
         , "-reducer", takeFileName self <> " reducer"
@@ -114,7 +122,7 @@ stageArgs p Stage{..} =
   where
     inputArgs   = concatMap (\path -> ["-input", path]) (M.keys stageInputs)
     shuffleArgs = concatMap (uncurry kvArgs)            (M.toList stageShuffle)
-    outputArgs  = concatMap (\(p,(t,f)) -> textFileArgs p t f)
+    outputArgs  = concatMap (\(p,(t,f)) -> sequenceFileArgs p t f)
                 . M.toList
                 $ M.intersectionWith (,) (pathTags p) stageOutputs
 
@@ -140,7 +148,7 @@ outputFileArgs fileFormat path tag kvFormat =
 
 runMapper :: Pipeline -> IO ()
 runMapper Pipeline{..} = do
-    inputFile <- stripHdfs . fromMaybe errorNoInput <$> lookupEnv inputFileVar
+    inputFile <- stripHdfs . fromMaybe errorNoInput <$> foldM lookupEnv' Nothing inputFileVars
 
     let step     = lookupStep inputFile
         inSchema = fFormat (stepInput step)
@@ -151,7 +159,10 @@ runMapper Pipeline{..} = do
              =$= encodeTagRows outSchema
              =$= CB.sinkHandle stdout
   where
-    inputFileVar = "map_input_file"
+    lookupEnv' Nothing k = lookupEnv k
+    lookupEnv' v       _ = return v
+
+    inputFileVars = ["map_input_file", "mapreduce_map_input_file"]
 
     lookupStep :: FilePath -> Step FilePath Tag
     lookupStep input = fromMaybe (errorNoMapper input)
@@ -161,7 +172,7 @@ runMapper Pipeline{..} = do
     outSchema :: Map Tag KVFormat
     outSchema = M.map (fFormat . stepInput) pReducers
 
-    errorNoInput        = error ("runMapper: could not detect input file, " ++ inputFileVar ++ " not set.")
+    errorNoInput        = error ("runMapper: could not detect input file, " ++ show inputFileVars ++ " not set.")
     errorNoMapper input = error ("runMapper: could not find mapper for input file: " ++ input)
 
 stripHdfs :: String -> FilePath

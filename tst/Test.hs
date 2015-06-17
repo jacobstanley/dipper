@@ -29,7 +29,7 @@ prop_map (xs :: [Int]) =
     sort (map (+1) xs) === sort ys
   where
     fs  = M.singleton "xs.in" (encodeList xs)
-    fs' = testPipeline (mkPipeline term) fs
+    fs' = testPipeline (mkPipeline "" term) fs
 
     ys = decodeList (unsafeLookup "prop_map" "ys.out" fs')
 
@@ -50,7 +50,7 @@ prop_group_fold (xs :: [Pair Int Int]) =
     (sort . foldValues (+) . groupByKey $ xs) === sort zs
   where
     fs  = M.singleton "xs.in" (encodeList xs)
-    fs' = testPipeline (mkPipeline term) fs
+    fs' = testPipeline (mkPipeline "" term) fs
 
     zs = decodeList (unsafeLookup "prop_group_fold" "zs.out" fs')
 
@@ -74,7 +74,7 @@ prop_two_outputs (xs :: [Int]) =
     sort (filter odd  xs) === sort odds
   where
     fs  = M.singleton "xs.in" (encodeList xs)
-    fs' = testPipeline (mkPipeline term) fs
+    fs' = testPipeline (mkPipeline "" term) fs
 
     evens = decodeList (unsafeLookup "prop_two_outputs" "evens.out" fs')
     odds  = decodeList (unsafeLookup "prop_two_outputs" "odds.out"  fs')
@@ -100,7 +100,7 @@ prop_two_outputs (xs :: [Int]) =
 prop_two_inputs (xs :: [Int], ys :: [Int]) =
     sort (xs ++ ys) === sort zs
   where
-    fs' = testPipeline (mkPipeline term) fs
+    fs' = testPipeline (mkPipeline "" term) fs
     fs  = M.fromList [ ("xs.in", encodeList xs)
                      , ("ys.in", encodeList ys) ]
 

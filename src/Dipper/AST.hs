@@ -475,9 +475,6 @@ findM2R = map snd
 freshNames :: [String]
 freshNames = map (\x -> "x" ++ show x) ([1..] :: [Integer])
 
-tempPaths :: [FilePath]
-tempPaths = map (\x -> show x ++ ".tmp") ([1..] :: [Integer])
-
 nextTag :: String -> Tag -> Tag
 nextTag msg tag | tag /= maxBound = succ tag
                 | otherwise       = error msg'

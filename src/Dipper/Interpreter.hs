@@ -44,6 +44,7 @@ import qualified Data.Text.Encoding as T
 import           Data.Tuple.Strict (Pair(..))
 import           Data.Typeable (Typeable)
 import           Data.Word (Word8)
+import           System.FilePath.Posix (takeBaseName)
 
 import           Dipper.AST
 import           Dipper.Binary
@@ -225,7 +226,7 @@ stagesOfPipeline p@Pipeline{..} = unfoldr nextStage inputPaths
     -- TODO it might be useful to be able to resume long
     -- TODO running jobs if we keep temporary files around.
     inputPaths = S.fromList
-               . filter (not . (".tmp" `isSuffixOf`))
+               . filter (\path -> takeBaseName path /= "temporary")
                $ M.keys pMappers
 
     fromFiles s = filesOfPipeline p `M.intersection` M.fromSet (const ()) s
@@ -266,8 +267,8 @@ stagesOfPipeline p@Pipeline{..} = unfoldr nextStage inputPaths
 
 ------------------------------------------------------------------------
 
-mkPipeline :: (Ord n, Show n) => Term n () -> Pipeline
-mkPipeline term = foldMap mkStepPipeline
+mkPipeline :: (Ord n, Show n) => FilePath -> Term n () -> Pipeline
+mkPipeline jobDir term = foldMap mkStepPipeline
                 . M.toList
                 . M.mapMaybe rootInput
                 . inputsOfTerm M.empty
@@ -279,6 +280,8 @@ mkPipeline term = foldMap mkStepPipeline
           . removeGroups 0
           . rename
           $ term
+
+    tempPaths = map (\x -> jobDir ++ "/temporary." ++ show x) ([1..] :: [Int])
 
     mkStepPipeline (n, Input' i kvt) = case i of
         MapperInput path -> mkMapper (Formatted path kvt)
