@@ -5,7 +5,7 @@
 {-# LANGUAGE TypeOperators #-}
 {-# OPTIONS_GHC -funbox-strict-fields #-}
 
-module Dipper.AST where
+module Dipper.Core where
 
 import           Data.Dynamic
 import           Data.List (sort, nubBy)
@@ -16,7 +16,7 @@ import           Data.Set (Set)
 import qualified Data.Set as S
 import           Data.Tuple (swap)
 
-import           Dipper.Types
+import           Dipper.Core.Types
 
 ------------------------------------------------------------------------
 -- Renaming
@@ -472,9 +472,6 @@ findM2R = map snd
 --------------------------------------------------------------------------
 -- Utils
 
-freshNames :: [String]
-freshNames = map (\x -> "x" ++ show x) ([1..] :: [Integer])
-
 nextTag :: String -> Tag -> Tag
 nextTag msg tag | tag /= maxBound = succ tag
                 | otherwise       = error msg'
@@ -497,52 +494,3 @@ unsafeLookup :: (Ord k, Show k, Show v) => String -> k -> Map k v -> v
 unsafeLookup msg k kvs = M.findWithDefault (error msg') k kvs
   where
     msg' = msg ++ ": name not found: " ++ show k ++ " in " ++ show (M.toList kvs)
-
-------------------------------------------------------------------------
--- Sink Flattens from FlumeJava paper
-
---sinkConcatOfTerm :: (Typeable n, Show n, Ord n)
---                 => [n]
---                 -> Map n Dynamic -- Dynamic :: Tail n _
---                 -> Term n b
---                 -> Term n b
---sinkConcatOfTerm fresh env term = case term of
---
---    Let (Name n)
---        (ConcatMap (f :: a -> [b])
---                   (Var (Name m) :: Atom n a)) tm
---     | Concat xss <- (unsafeDynLookup "sinkConcatOfTerm" m env :: Tail n a)
---     ->
---
---        let
---            yss             = map (ConcatMap f) xss
---            (ns, n':fresh') = splitAt (length yss) fresh
---            tl'             = Concat (map (Var . Name) ns) :: Tail n b
---            env'            = foldr (uncurry M.insert) env
---                                    ((n', toDyn tl') : zip ns (map toDyn yss))
---
---            name = Name n'
---            var  = toDyn (Var name)
---            tm'  = sinkConcatOfTerm fresh' env'
---                 $ substTerm (M.singleton n var) tm
---        in
---            lets (zip (map Name ns) yss) $
---            Let name tl' tm'
---
---
---    Let (Name n) tl tm ->
---
---        let
---            env' = M.insert n (toDyn tl) env
---        in
---            Let (Name n) tl (sinkConcatOfTerm fresh env' tm)
---
---    Write o x tm -> Write o x (sinkConcatOfTerm fresh env tm)
---    Return  x    -> Return  x
---  where
---    lets :: (Typeable n, Typeable a, KV a)
---         => [(Name n a, Tail n a)]
---         -> Term n b
---         -> Term n b
---    lets []            tm = tm
---    lets ((n, tl):tls) tm = Let n tl (lets tls tm)

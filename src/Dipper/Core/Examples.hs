@@ -1,14 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeOperators #-}
 
-module Dipper.Examples where
+module Dipper.Core.Examples where
 
 import           Data.Monoid ((<>))
 import           Data.Text (Text)
 import qualified Data.Text as T
 import           Data.Tuple.Strict (Pair(..))
 
-import           Dipper.Types
+import           Dipper.Core.Types
 
 ------------------------------------------------------------------------
 

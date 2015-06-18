@@ -5,7 +5,7 @@
 module Dipper (
       HadoopEnv(..)
     , dipperMain
-    , cloudera
+    , clouderaEnv
     ) where
 
 import           Control.Applicative ((<|>))
@@ -33,10 +33,11 @@ import           System.IO (Handle, stdin, stdout, stderr)
 import           System.Process (StdStream(..), CreateProcess(..))
 import           System.Process (proc, createProcess, waitForProcess)
 
-import           Dipper.Internal hiding (runJob)
-import           Dipper.Interpreter
+import           Dipper.Core.Types
+import           Dipper.Hadoop.Environment
+import           Dipper.Hadoop.Encoding
 import           Dipper.Jar (withDipperJar)
-import           Dipper.Types
+import           Dipper.Pipeline
 
 ------------------------------------------------------------------------
 
@@ -96,7 +97,7 @@ runStage henv jar stageDir pipeline stage = do
 
     program self = proc (hadoopExec henv) (mkArgs self)
     mkArgs  self =
-        [ "jar", streamingJar henv
+        [ "jar", hadoopStreamingJar henv
         , "-files", self
         , "-libjars", jar
 
@@ -128,7 +129,7 @@ stageArgs p Stage{..} =
 
 
 kvArgs :: Tag -> KVFormat -> [String]
-kvArgs tag (kFmt :!: vFmt) =
+kvArgs tag (kFmt, vFmt) =
     [ "-D", "dipper.tag." ++ show tag ++ ".key="   ++ T.unpack (fmtType kFmt)
     , "-D", "dipper.tag." ++ show tag ++ ".value=" ++ T.unpack (fmtType vFmt) ]
 

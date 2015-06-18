@@ -22,14 +22,14 @@ library
 
   exposed-modules:
     Dipper
-    Dipper.AST
-    Dipper.Binary
-    Dipper.Examples
-    Dipper.Interpreter
-    Dipper.Types
+    Dipper.Core
+    Dipper.Core.Examples
+    Dipper.Core.Types
+    Dipper.Hadoop.Encoding
+    Dipper.Hadoop.Environment
+    Dipper.Pipeline
 
   other-modules:
-    Dipper.Internal
     Dipper.Jar
 
   build-depends:

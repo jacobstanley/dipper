@@ -2,7 +2,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -fno-warn-missing-signatures #-}
-{-# OPTIONS_GHC -w #-}
 
 import           Control.Monad (when)
 import           Data.Binary.Get (runGet, isEmpty)
@@ -15,13 +14,12 @@ import           Data.Maybe (fromMaybe, catMaybes)
 import           Data.Tuple.Strict (Pair(..))
 import           System.Exit (exitFailure)
 
-import           Dipper.AST (removeGroups)
-import           Dipper.Interpreter hiding (foldValues)
-import           Dipper.Types
+import           Dipper.Core (removeGroups)
+import           Dipper.Core.Types
+import           Dipper.Hadoop.Encoding
+import           Dipper.Pipeline hiding (foldValues)
 
 import           Test.QuickCheck
-
-import Debug.Trace (traceShow)
 
 ------------------------------------------------------------------------
 
@@ -138,15 +136,15 @@ foldValues append xs = catMaybes (ys ++ [y])
 
 ------------------------------------------------------------------------
 
-encodeList :: forall a. KV a => [a] -> L.ByteString
+encodeList :: forall a. HadoopKV a => [a] -> L.ByteString
 encodeList = runPut . mapM_ encodeRow . map encodeKV
   where
-    (kf :!: vf) = kvFormat (undefined :: a)
+    (kf, vf) = kvFormat (undefined :: a)
 
     encodeRow (Row _ k v) = putLayout (fmtLayout kf) k
                          >> putLayout (fmtLayout vf) v
 
-decodeList :: forall a. KV a => L.ByteString -> [a]
+decodeList :: forall a. HadoopKV a => L.ByteString -> [a]
 decodeList = map decodeKV . runGet decodeRows
   where
     decodeRows = do
@@ -158,7 +156,7 @@ decodeList = map decodeKV . runGet decodeRows
     decodeRow = Row () <$> getLayout (fmtLayout kf)
                        <*> getLayout (fmtLayout vf)
 
-    (kf :!: vf) = kvFormat (undefined :: a)
+    (kf, vf) = kvFormat (undefined :: a)
 
 
 unsafeLookup :: (Ord k, Show k, Show v) => String -> k -> Map k v -> v

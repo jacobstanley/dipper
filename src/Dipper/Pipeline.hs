@@ -1,56 +1,39 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE TypeOperators #-}
-
-{-# LANGUAGE FlexibleContexts #-}
 
 {-# OPTIONS_GHC -w #-}
 
-module Dipper.Interpreter where
+module Dipper.Pipeline where
 
 import           Control.Exception (SomeException)
-import           Control.Monad (mplus, void, forever)
+import           Control.Monad (void)
 import           Control.Monad.Catch (MonadThrow(..))
-import           Control.Monad.Identity (Identity(..))
-import           Control.Monad.State (MonadState(..), modify, runState, execState)
 import           Data.Binary.Get
 import           Data.Binary.Put
 import qualified Data.ByteString as B
-import           Data.ByteString.Builder
 import qualified Data.ByteString.Lazy as L
-import           Data.Conduit ((=$=), ($$), runConduit, yield, sequenceConduits, sequenceSinks)
-import           Data.Conduit (Source, Sink, Consumer, Producer, Conduit)
+import           Data.Conduit ((=$=), runConduit, yield, sequenceConduits)
+import           Data.Conduit (Source, Conduit)
 import qualified Data.Conduit.Binary as CB
 import qualified Data.Conduit.List as CL
 import           Data.Conduit.Serialization.Binary (conduitGet, conduitPut)
 import           Data.Dynamic
-import           Data.Foldable (traverse_)
-import           Data.Int (Int32, Int64)
-import           Data.List (foldl', sort, sortBy, unfoldr, isSuffixOf)
+import           Data.List (sortBy, unfoldr)
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
-import           Data.Maybe (fromMaybe)
-import           Data.Maybe (maybeToList, mapMaybe)
-import           Data.Ord (Ordering(..))
 import           Data.Set (Set)
 import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import           Data.Tuple.Strict (Pair(..))
-import           Data.Typeable (Typeable)
-import           Data.Word (Word8)
 import           System.FilePath.Posix (takeBaseName)
 
-import           Dipper.AST
-import           Dipper.Binary
-import           Dipper.Types
-
-import           Debug.Trace
+import           Dipper.Core
+import           Dipper.Core.Types
+import           Dipper.Hadoop.Encoding
 
 ------------------------------------------------------------------------
 
@@ -63,7 +46,7 @@ data Step i o = Step {
     stepInput   ::  Formatted i
   , stepOutputs :: [Formatted o]
   , stepTerm    :: Term Int ()
-  , stepExec    :: (Monad m, Typeable m) => Conduit (Row ()) m (Row o)
+  , stepExec    :: forall m. (Monad m, Typeable m) => Conduit (Row ()) m (Row o)
   }
 
 type Mapper  = Step FilePath Tag
@@ -83,7 +66,7 @@ data Pipeline = Pipeline {
 ------------------------------------------------------------------------
 
 instance (Show i, Show o) => Show (Step i o) where
-    showsPrec p (Step inp outs tm _) =
+    showsPrec p (Step inp outs tm _) = showParen (p > 10) $
         showString "Step " . showsPrec 11 inp
                            . showString " "
                            . showsPrec 11 outs
@@ -144,10 +127,7 @@ testPipeline p@Pipeline{..} files = foldl runStage files stages
                   => Mapper
                   -> Source m B.ByteString
                   -> Source m (Row Tag)
-        runMapper Step{..} = (=$= decodeUnitRows schema =$= stepExec)
-          where
-            path   = fName stepInput
-            schema = fFormat stepInput
+        runMapper Step{..} = (=$= decodeUnitRows (fFormat stepInput) =$= stepExec)
 
         runReducer :: (MonadThrow m, Typeable m) => Conduit (Row Tag) m (Row FilePath)
         runReducer = encodeTagRows schema
@@ -162,9 +142,6 @@ testPipeline p@Pipeline{..} files = foldl runStage files stages
                                            =$= stepExec r)
                      $ pReducers
 
-    fileSink :: Sink (Row FilePath) Identity [Row FilePath]
-    fileSink = CL.consume
-
     shuffle :: Monad m => Conduit (Row Tag) m (Row Tag)
     shuffle = do
         xs <- CL.consume
@@ -176,7 +153,7 @@ testPipeline p@Pipeline{..} files = foldl runStage files stages
             EQ  -> fmtCompare kFmt k1 k2
             ord -> ord
       where
-        (kFmt :!: _) = unsafeLookup "testPipeline.tagKeyCompare" t1 schema
+        (kFmt, _) = unsafeLookup "testPipeline.tagKeyCompare" t1 schema
 
     schema :: Map Tag KVFormat
     schema = M.map (\r -> fFormat (stepInput r)) pReducers
@@ -304,8 +281,6 @@ mkPipeline jobDir term = foldMap mkStepPipeline
       _            -> error "mkPipeline: multiple inputs assigned to a single variable"
 
     isRoot (DistTo _ d) = d == 0
-
-    kvUnit = unitFormat :!: unitFormat
 
 ------------------------------------------------------------------------
 
@@ -458,16 +433,17 @@ evalMapperTerm term = case term of
       in
           M.unionWith dynJoin conduits'tm conduits'tl
 
+-- TODO doesn't look at the whole term, only the first let
 evalMapperTerm' :: forall m n a. (Monad m, Typeable m, Show n, Ord n)
                 => Term n a
                 -> Conduit (Row ()) m (Row Tag)
 evalMapperTerm' term = case term of
     Let (Name n) (Read (_ :: Input b)) _ ->
       let
-          (dynConduit, _) = unsafeLookup "evalMapperTerm'" n conduits
+          (conduit'dyn, _) = unsafeLookup "evalMapperTerm'" n conduits
 
           conduit'b :: Conduit b m (Row Tag)
-          conduit'b =  fromDynConduit "evalMapperTerm'" dynConduit
+          conduit'b =  fromDynConduit "evalMapperTerm'" conduit'dyn
       in
           CL.map decodeKV =$= conduit'b
   where
@@ -506,16 +482,17 @@ evalReducerTerm term = case term of
       in
           M.unionWith dynJoin conduits'tm conduits'tl
 
+-- TODO doesn't look at the whole term, only the first let
 evalReducerTerm' :: forall m n a. (Monad m, Typeable m, Show n, Ord n)
                  => Term n a
                  -> Conduit (Row ()) m (Row FilePath)
 evalReducerTerm' term = case term of
     Let (Name n) (Read (_ :: Input b)) _ ->
       let
-          (dynConduit, _) = unsafeLookup "evalReducerTerm'" n conduits
+          (conduit'dyn, _) = unsafeLookup "evalReducerTerm'" n conduits
 
           conduit'b :: Conduit b m (Row FilePath)
-          conduit'b = fromDynConduit "evalReducerTerm'" dynConduit
+          conduit'b = fromDynConduit "evalReducerTerm'" conduit'dyn
       in
           CL.map decodeKV =$= conduit'b
   where
@@ -548,79 +525,3 @@ decodeRows getTag schema = conduitGet (getRow getTag schema)
 
 encodeRows :: (MonadThrow m, Show a, Ord a) => (a -> Put) -> Map a KVFormat -> Conduit (Row a) m B.ByteString
 encodeRows putTag schema = CL.map (putRow putTag schema) =$= conduitPut
-
-getRow :: (Show a, Ord a) => Get a -> Map a KVFormat -> Get (Row a)
-getRow getTag schema = do
-    tag <- getTag
-    case M.lookup tag schema of
-      Nothing              -> fail ("getRow: invalid tag <" ++ show tag ++ ">")
-      Just (kFmt :!: vFmt) -> Row tag <$> getLayout (fmtLayout kFmt)
-                                      <*> getLayout (fmtLayout vFmt)
-
-putRow :: (Show a, Ord a) => (a -> Put) -> Map a KVFormat -> Row a -> Put
-putRow putTag schema (Row tag k v) =
-    case M.lookup tag schema of
-      Nothing              -> fail ("putRow: invalid tag <" ++ show tag ++ ">")
-      Just (kFmt :!: vFmt) -> putTag tag >> putLayout (fmtLayout kFmt) k
-                                         >> putLayout (fmtLayout vFmt) v
-
-------------------------------------------------------------------------
-
-unitFormat :: Format
-unitFormat = format (undefined :: ())
-
-textFormat :: Format
-textFormat = format (undefined :: T.Text)
-
-bytesFormat :: Format
-bytesFormat = format (undefined :: B.ByteString)
-
-int32Format :: Format
-int32Format = format (undefined :: Int32)
-
-intFormat :: Format
-intFormat = format (undefined :: Int)
-
-testEncDecTagged :: Either SomeException [Row Word8]
-testEncDecTagged = runConduit
-                 $ CL.sourceList xs
-               =$= encodeRows putWord8 schema
-               =$= decodeRows getWord8 schema
-               =$= CL.take 10
-  where
-    xs = cycle [ Row 67 "abcdefg" B.empty
-               , Row 67 "123"     B.empty
-               , Row 22 "1234"    "Hello World!" ]
-
-    schema = M.fromList [ (67, textFormat  :!: unitFormat)
-                        , (22, int32Format :!: bytesFormat) ]
-
-sampleTextText :: Either SomeException L.ByteString
-sampleTextText = fmap L.fromChunks . runConduit
-               $ CL.sourceList rows
-             =$= encodeUnitRows (textFormat :!: textFormat)
-             =$= CL.consume
-  where
-    rows = [ Row () "hello"   "hello"
-           , Row () "foo"     "foo"
-           , Row () "foo"     "bar"
-           , Row () "goodbye" "goodbye"
-           , Row () "foo"     "quxx"
-           , Row () "hello"   "world"
-           , Row () "foo"     "baz"
-           ]
-
-sampleTextInt :: Either SomeException L.ByteString
-sampleTextInt = fmap L.fromChunks . runConduit
-              $ CL.sourceList rows
-            =$= encodeUnitRows (textFormat :!: intFormat)
-            =$= CL.consume
-  where
-    rows = [ Row () "hello"   "00000000"
-           , Row () "foo"     "00000001"
-           , Row () "foo"     "00000002"
-           , Row () "goodbye" "00000003"
-           , Row () "foo"     "00000004"
-           , Row () "hello"   "00000005"
-           , Row () "foo"     "00000006"
-           ]
